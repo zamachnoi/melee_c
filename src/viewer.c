@@ -818,7 +818,7 @@ static const char *html_doc =
     "if(my!==seq)return;"
     "const dv=new DataView(ab);"
     "const jlen=dv.getUint32(0,false);"
-    "const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4+jlen)));"
+    "const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4,jlen)));"
     "const bmp=await createImageBitmap(new Blob([ab.slice(4+jlen)],{type:'image/png'}));"
     "if(my!==seq){bmp.close();return;}"
     "ctx.drawImage(bmp,0,0);bmp.close();"
