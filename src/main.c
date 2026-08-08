@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
     for (int32_t fn = -123; fn <= r.last_frame; fn++) {
         bool any = false;
         for (unsigned p = 0; p < SLP_MAX_PORTS; p++) {
-            slp_frame_t *f = slp_frame_at(&r, p, false, fn);
+            const slp_frame_t *f = slp_frame_at(&r, p, false, fn);
             if (f) {
                 if (!any) printf("frame %d\n", fn);
                 print_frame(stdout, f);
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        slp_item_list_t *items = slp_items_at(&r, fn);
+        const slp_item_list_t *items = slp_items_at(&r, fn);
         if (items && items->count) {
             for (size_t i = 0; i < items->count; i++) {
                 const slp_item_t *it = &items->items[i];

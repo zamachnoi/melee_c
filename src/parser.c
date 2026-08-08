@@ -819,18 +819,19 @@ void slp_replay_free(slp_replay_t *r) {
     r->stadium = NULL;
 }
 
-slp_frame_t *slp_frame_at(slp_replay_t *r, unsigned port, bool follower,
-                          int32_t frame_number) {
+const slp_frame_t *slp_frame_at(const slp_replay_t *r, unsigned port,
+                                bool follower, int32_t frame_number) {
     if (port >= SLP_MAX_PORTS) return NULL;
     unsigned slot = port * 2 + (follower ? 1u : 0u);
-    slp_slot_t *s = &r->slots[slot];
+    const slp_slot_t *s = &r->slots[slot];
     if (!s->active || !s->frames) return NULL;
     size_t idx = frame_index(frame_number);
     if (idx >= s->count) return NULL;
     return &s->frames[idx];
 }
 
-slp_item_list_t *slp_items_at(slp_replay_t *r, int32_t frame_number) {
+const slp_item_list_t *slp_items_at(const slp_replay_t *r,
+                                    int32_t frame_number) {
     size_t idx = frame_index(frame_number);
     if (idx >= r->frame_items_count) return NULL;
     return &r->frame_items[idx];

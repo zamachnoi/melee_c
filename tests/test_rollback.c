@@ -195,8 +195,8 @@ int main(void) {
 
     assert(r.frame_count == SLP_FRAME_BASE + 2);
 
-    slp_frame_t *f0 = slp_frame_at(&r, 0, false, 0);
-    slp_frame_t *f1 = slp_frame_at(&r, 0, false, 1);
+    const slp_frame_t *f0 = slp_frame_at(&r, 0, false, 0);
+    const slp_frame_t *f1 = slp_frame_at(&r, 0, false, 1);
     assert(f0 != NULL && f1 != NULL);
 
     /* latest version of frame 0 must win */
@@ -210,7 +210,7 @@ int main(void) {
     assert(f1->percent == 12.5f);
 
     /* items: latest version of frame 0 wins */
-    slp_item_list_t *items = slp_items_at(&r, 0);
+    const slp_item_list_t *items = slp_items_at(&r, 0);
     assert(items != NULL);
     assert(items->count == 1);
     assert(items->items[0].spawn_id == 1);

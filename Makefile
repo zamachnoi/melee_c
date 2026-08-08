@@ -5,7 +5,7 @@ CPPFLAGS ?= -Isrc
 BIN := bin
 BUILD := build
 
-all: $(BIN)/melee $(BIN)/test_rollback
+all: $(BIN)/melee $(BIN)/test_rollback $(BIN)/viewer
 
 $(BIN)/melee: $(BUILD)/main.o $(BUILD)/parser.o
 	@mkdir -p $(BIN)
@@ -14,6 +14,10 @@ $(BIN)/melee: $(BUILD)/main.o $(BUILD)/parser.o
 $(BIN)/test_rollback: $(BUILD)/test_rollback.o $(BUILD)/parser.o
 	@mkdir -p $(BIN)
 	$(CC) $(CFLAGS) -o $@ $^
+
+$(BIN)/viewer: $(BUILD)/viewer.o $(BUILD)/parser.o
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) -o $@ $^ -lpthread -lm
 
 $(BUILD)/%.o: src/%.c src/parser.h
 	@mkdir -p $(BUILD)
@@ -29,7 +33,10 @@ test: $(BIN)/test_rollback
 run: $(BIN)/melee
 	$(BIN)/melee fixtures/vertical.slp
 
+viewer: $(BIN)/viewer
+	$(BIN)/viewer
+
 clean:
 	rm -rf $(BIN) $(BUILD)
 
-.PHONY: all test run clean
+.PHONY: all test run viewer clean

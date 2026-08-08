@@ -159,10 +159,11 @@ typedef struct {
 slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out);
 void slp_replay_free(slp_replay_t *r);
 
-slp_frame_t *slp_frame_at(slp_replay_t *r, unsigned port, bool follower,
-                          int32_t frame_number);
+const slp_frame_t *slp_frame_at(const slp_replay_t *r, unsigned port,
+                                bool follower, int32_t frame_number);
 
-slp_item_list_t *slp_items_at(slp_replay_t *r, int32_t frame_number);
+const slp_item_list_t *slp_items_at(const slp_replay_t *r,
+                                    int32_t frame_number);
 const slp_fod_platform_t *slp_fod_at(slp_replay_t *r, int32_t frame_number,
                                      unsigned platform);
 const slp_whispy_blow_t *slp_whispy_at(slp_replay_t *r, int32_t frame_number);
