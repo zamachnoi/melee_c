@@ -31,6 +31,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <zlib.h>
+
 #include "parser.h"
 
 #define FB_W 960
@@ -184,15 +186,16 @@ static void draw_stage(const slp_game_start_t *gs, const cam_t *cam) {
     }
 }
 
+/* Frame rendering
+ * ------------------------------------------------------------------ */
+
 static const color_t port_colors[4] = {
     {255, 90, 90, 255},  {90, 150, 255, 255},
     {255, 220, 80, 255}, {90, 255, 150, 255},
 };
 
-/* ------------------------------------------------------------------ */
-/* Frame rendering                                                     */
-/* ------------------------------------------------------------------ */
-
+/* Renders the full frame: stage (redrawn every frame for moving stages),
+   items, and players. */
 static void render_frame(const active_t *a, int32_t fn) {
     memset(g_fb, 40, sizeof g_fb); /* dark background */
 
@@ -270,9 +273,7 @@ static const char *frame_json(const active_t *a, int32_t fn, char *buf,
                               size_t cap) {
     size_t o = 0;
     o += (size_t)snprintf(buf + o, cap - o,
-                          "{\"frame\":%d,\"scale\":%.4f,\"cx\":%.2f,"
-                          "\"cy\":%.2f,\"w\":%d,\"h\":%d,\"players\":[",
-                          fn, a->cam.scale, a->cam.cx, a->cam.cy, FB_W, FB_H);
+                          "{\"frame\":%d,\"players\":[", fn);
 
     const slp_game_start_t *gs = &a->replay.game_start;
     bool first = true;
@@ -291,29 +292,10 @@ static const char *frame_json(const active_t *a, int32_t fn, char *buf,
             json_escape(gs->name[port], name, sizeof name);
             o += (size_t)snprintf(buf + o, cap - o,
                                   "{\"port\":%u,\"name\":\"%s\",\"char\":\"%s\","
-                                  "\"x\":%.2f,\"y\":%.2f,\"facing\":%.1f,"
                                   "\"percent\":%.1f,\"stocks\":%u,"
-                                  "\"shield\":%.1f,\"state\":\"0x%04X\","
-                                  "\"air\":%d,\"follower\":%d}",
-                                  port + 1, name, cname, f->x, f->y, f->facing,
-                                  f->percent, f->stocks_remaining, f->shield_size,
-                                  f->action_state, f->is_airborne ? 1 : 0,
-                                  pass);
-        }
-    }
-    o += (size_t)snprintf(buf + o, cap - o, "],\"items\":[");
-
-    first = true;
-    const slp_item_list_t *items = slp_items_at(&a->replay, fn);
-    if (items) {
-        for (size_t i = 0; i < items->count; i++) {
-            const slp_item_t *it = &items->items[i];
-            if (!first) o += (size_t)snprintf(buf + o, cap - o, ",");
-            first = false;
-            o += (size_t)snprintf(buf + o, cap - o,
-                                  "{\"type\":%u,\"spawn\":%u,\"x\":%.2f,"
-                                  "\"y\":%.2f}",
-                                  it->type_id, it->spawn_id, it->x, it->y);
+                                  "\"state\":\"0x%04X\",\"follower\":%d}",
+                                  port + 1, name, cname, f->percent,
+                                  f->stocks_remaining, f->action_state, pass);
         }
     }
     o += (size_t)snprintf(buf + o, cap - o, "]}");
@@ -542,6 +524,79 @@ static int replays_json(char *buf, size_t cap) {
 }
 
 /* ------------------------------------------------------------------ */
+/* PNG encoding                                                        */
+/* ------------------------------------------------------------------ */
+
+static void png_chunk(uint8_t *dst, const char *type, const uint8_t *data,
+                      size_t len) {
+    dst[0] = (uint8_t)(len >> 24);
+    dst[1] = (uint8_t)(len >> 16);
+    dst[2] = (uint8_t)(len >> 8);
+    dst[3] = (uint8_t)len;
+    memcpy(dst + 4, type, 4);
+    memcpy(dst + 8, data, len);
+    uint32_t c = crc32(0L, Z_NULL, 0);
+    c = crc32(c, (const Bytef *)type, 4);
+    c = crc32(c, data, (uInt)len);
+    dst[8 + len] = (uint8_t)(c >> 24);
+    dst[8 + len + 1] = (uint8_t)(c >> 16);
+    dst[8 + len + 2] = (uint8_t)(c >> 8);
+    dst[8 + len + 3] = (uint8_t)c;
+}
+
+/* Encodes an RGBA framebuffer as an 8-bit RGB PNG. Returns size, 0 on
+   error. Caller frees *out. */
+static size_t png_encode(const uint8_t *rgba, int w, int h, uint8_t **out) {
+    size_t row_bytes = (size_t)w * 3;
+    size_t raw_len = (row_bytes + 1) * (size_t)h;
+    uint8_t *raw = malloc(raw_len);
+    if (!raw) return 0;
+    size_t o = 0;
+    for (int y = 0; y < h; y++) {
+        raw[o++] = 0; /* filter: none */
+        for (int x = 0; x < w; x++) {
+            const uint8_t *p = &rgba[(y * w + x) * 4];
+            raw[o++] = p[0];
+            raw[o++] = p[1];
+            raw[o++] = p[2];
+        }
+    }
+    uLongf clen = compressBound(raw_len);
+    uint8_t *z = malloc(clen);
+    if (!z) { free(raw); return 0; }
+    if (compress2(z, &clen, raw, raw_len, 6) != Z_OK) {
+        free(raw); free(z); return 0;
+    }
+    free(raw);
+
+    uint8_t *png = malloc(8 + 25 + (12 + clen) + 12);
+    if (!png) { free(z); return 0; }
+    size_t p = 0;
+    static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    memcpy(png, sig, 8);
+    p = 8;
+
+    uint8_t ihdr[13];
+    ihdr[0] = (uint8_t)(w >> 24); ihdr[1] = (uint8_t)(w >> 16);
+    ihdr[2] = (uint8_t)(w >> 8);  ihdr[3] = (uint8_t)w;
+    ihdr[4] = (uint8_t)(h >> 24); ihdr[5] = (uint8_t)(h >> 16);
+    ihdr[6] = (uint8_t)(h >> 8);  ihdr[7] = (uint8_t)h;
+    ihdr[8] = 8; /* bit depth */
+    ihdr[9] = 2; /* color type: RGB */
+    ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    png_chunk(png + p, "IHDR", ihdr, 13);
+    p += 25;
+    png_chunk(png + p, "IDAT", z, clen);
+    p += 12 + clen;
+    png_chunk(png + p, "IEND", NULL, 0);
+    p += 12;
+
+    free(z);
+    *out = png;
+    return p;
+}
+
+/* ------------------------------------------------------------------ */
 /* Request handlers                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -557,21 +612,29 @@ static void handle_frame(int cfd, const char *query) {
     render_frame(&g_active, fn);
     char json[16384];
     frame_json(&g_active, fn, json, sizeof json);
+    uint8_t *png;
+    size_t plen = png_encode(g_fb, FB_W, FB_H, &png);
     pthread_mutex_unlock(&g_lock);
 
+    if (!plen) {
+        send_response(cfd, "text/plain", "encode error", 12);
+        return;
+    }
     size_t jlen = strlen(json);
-    size_t body_len = 4 + jlen + (size_t)FB_W * FB_H * 4;
-    unsigned char *body = malloc(body_len);
+    size_t body_len = 4 + jlen + plen;
+    uint8_t *body = malloc(body_len);
     if (!body) {
+        free(png);
         send_response(cfd, "text/plain", "oom", 3);
         return;
     }
-    body[0] = (unsigned char)(jlen >> 24);
-    body[1] = (unsigned char)(jlen >> 16);
-    body[2] = (unsigned char)(jlen >> 8);
-    body[3] = (unsigned char)jlen;
+    body[0] = (uint8_t)(jlen >> 24);
+    body[1] = (uint8_t)(jlen >> 16);
+    body[2] = (uint8_t)(jlen >> 8);
+    body[3] = (uint8_t)jlen;
     memcpy(body + 4, json, jlen);
-    memcpy(body + 4 + jlen, g_fb, (size_t)FB_W * FB_H * 4);
+    memcpy(body + 4 + jlen, png, plen);
+    free(png);
     send_response(cfd, "application/octet-stream", body, body_len);
     free(body);
 }
@@ -707,51 +770,51 @@ static const char *html_doc =
     "const sel=document.getElementById('sel'),sl=document.getElementById('slider');"
     "const playBtn=document.getElementById('playBtn'),file=document.getElementById('file');"
     "const fl=document.getElementById('frameLabel'),hud=document.getElementById('hud');"
-    "let info=null,playing=false,cur=0,raf=0,lastT=0,img=null;"
+    "let info=null,playing=false,cur=0,raf=0,lastT=0,seq=0,busy=false;"
     "const W=960,H=540;"
-    "async function fetchReplays(){"
-    "const r=await fetch('/api/replays');const list=await r.json();"
-    "sel.innerHTML=list.map(r=>`<option>${r.name}</option>`).join('');"
-    "if(!list.length)return;"
-    "if(!info||!list.some(r=>r.name===info.name)){await load(list[0].name);}"
-    "}"
-    "async function load(name){"
-    "const r=await fetch('/api/set?f='+encodeURIComponent(name));info=await r.json();"
-    "sl.min=info.start;sl.max=info.last;cur=info.start;sl.value=cur;"
-    "document.title='SLP Debug Viewer - '+info.name;"
-    "await show(cur);"
-    "}"
-    "async function show(n){"
-    "const res=await fetch('/api/frame?n='+n);"
-    "const ab=await res.arrayBuffer();const dv=new DataView(ab);"
-    "const jlen=dv.getUint32(0,false);"
-    "const js=new TextDecoder().decode(new Uint8Array(ab,4,jlen));"
-    "const st=JSON.parse(js);"
-    "if(!img)img=ctx.createImageData(st.w,st.h);"
-    "img.data.set(new Uint8Array(ab,4+jlen,st.w*st.h*4));"
-    "ctx.putImageData(img,0,0);"
-    "fl.textContent=st.frame+' / '+info.last;"
-    "let h='';const P=[];"
-    "st.players.forEach(p=>{"
-    "const sx=(p.x-st.cx)*st.scale+W/2,sy=H/2-(p.y-st.cy)*st.scale;"
-    "h+=`<b style=\"background:hsl(${(p.port-1)*90} 90% 60%)\"></b>`+"
-    "`${p.name||('P'+p.port)} ${p.char} ${p.percent.toFixed(1)}% x${p.stocks}`+"
-    "`<span style=\"color:#888\"> ${p.state}</span><br>`;"
-    "});"
-    "hud.innerHTML=h;"
-    "}"
-    "async function step(d){if(playing){"
-    "cur=Math.min(cur+1,info.last);sl.value=cur;await show(cur);"
-    "if(cur>=info.last){toggle();}return;}"
-    "}"
+"const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];"
+"async function fetchReplays(){"
+"const r=await fetch('/api/replays');const list=await r.json();"
+"sel.innerHTML=list.map(r=>`<option>${r.name}</option>`).join('');"
+"if(!list.length)return;"
+"if(!info||!list.some(r=>r.name===info.name)){await load(list[0].name);}"
+"}"
+"async function load(name){"
+"const r=await fetch('/api/set?f='+encodeURIComponent(name));info=await r.json();"
+"sl.min=info.start;sl.max=info.last;cur=info.start;sl.value=cur;"
+"document.title='SLP Debug Viewer - '+info.name;"
+"await show(cur);"
+"}"
+"async function show(n){"
+"const my=++seq;"
+"const ab=await(await fetch('/api/frame?n='+n)).arrayBuffer();"
+"const dv=new DataView(ab);"
+"const jlen=dv.getUint32(0,false);"
+"const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4,jlen)));"
+"if(my!==seq)return;"
+"const bmp=await createImageBitmap(new Blob([new Uint8Array(ab,4+jlen)],{type:'image/png'}));"
+"if(my!==seq){bmp.close();return;}"
+"ctx.drawImage(bmp,0,0);bmp.close();"
+"fl.textContent=st.frame+' / '+info.last;"
+"hud.innerHTML=st.players.map(p=>{"
+"const c=COL[(p.port-1)%4];"
+"return`<b style=\"background:${c}\"></b>`+"
+"`${p.name||('P'+p.port)} ${p.char} ${p.percent.toFixed(1)}% x${p.stocks}`+"
+"`<span style=\"color:#888\"> ${p.state}</span><br>`;"
+"}).join('');"
+"}"
     "function toggle(){playing=!playing;playBtn.textContent=playing?'Pause':'Play';"
     "if(playing){lastT=performance.now();raf=requestAnimationFrame(loop);}"
-    "else cancelAnimationFrame(raf);}"
-    "function loop(t){if(!playing)return;"
+    "else{cancelAnimationFrame(raf);}}"
+    "function loop(t){"
+    "if(!playing)return;"
     "const dt=t-lastT;lastT=t;"
-    "if(dt>=16){cur=Math.min(cur+1,info.last);sl.value=cur;show(cur);"
+    "if(dt>=16&&!busy){"
+    "cur=Math.min(cur+1,info.last);sl.value=cur;"
+    "busy=true;show(cur).finally(()=>{busy=false;});"
     "if(cur>=info.last){toggle();return;}}"
-    "raf=requestAnimationFrame(loop);}"
+    "raf=requestAnimationFrame(loop);"
+    "}"
     "playBtn.onclick=toggle;"
     "sl.oninput=()=>{cur=+sl.value;show(cur);};"
     "sel.onchange=()=>load(sel.value);"

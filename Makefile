@@ -17,7 +17,7 @@ $(BIN)/test_rollback: $(BUILD)/test_rollback.o $(BUILD)/parser.o
 
 $(BIN)/viewer: $(BUILD)/viewer.o $(BUILD)/parser.o
 	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) -o $@ $^ -lpthread -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lpthread -lm -lz
 
 $(BUILD)/%.o: src/%.c src/parser.h
 	@mkdir -p $(BUILD)

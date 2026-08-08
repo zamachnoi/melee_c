@@ -3,7 +3,7 @@
 # them from the browser.
 
 FROM alpine:3.20 AS build
-RUN apk add --no-cache build-base
+RUN apk add --no-cache build-base zlib-dev zlib-static
 WORKDIR /src
 COPY src/ src/
 COPY Makefile .
