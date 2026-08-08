@@ -73,11 +73,20 @@ int main(int argc, char **argv) {
     printf("played: %s\n", r.played_on);
     printf("last:   %d\n", r.last_frame);
     printf("frames: %zu\n", r.frame_count);
+
+    size_t item_total = 0, item_frames = 0;
+    for (size_t i = 0; i < r.frame_items_count; i++) {
+        if (r.frame_items[i].count) item_frames++;
+        item_total += r.frame_items[i].count;
+    }
+    printf("items:  %zu events across %zu frames\n", item_total, item_frames);
+    printf("fod:    %zu whispy: %zu stadium: %zu\n", r.fod_count,
+           r.whispy_count, r.stadium_count);
     for (int i = 0; i < SLP_MAX_PORTS; i++) {
         if (!gs->has_player[i]) continue;
         printf("port %d: char %d (%s) costume %u stocks %u name '%s' code '%s'\n",
                i + 1, gs->external_char_id[i],
-               slp_character_name(gs->external_char_id[i]),
+               slp_character_name(slp_external_to_internal(gs->external_char_id[i])),
                gs->costume_index[i], gs->stock_count[i], gs->name[i],
                gs->connect_code[i]);
     }
@@ -93,6 +102,29 @@ int main(int argc, char **argv) {
                 any = true;
             }
         }
+
+        slp_item_list_t *items = slp_items_at(&r, fn);
+        if (items && items->count) {
+            for (size_t i = 0; i < items->count; i++) {
+                const slp_item_t *it = &items->items[i];
+                printf("  item %-14s type=0x%04X spawn=%u x=%8.2f y=%8.2f "
+                       "vx=%6.2f vy=%6.2f owner=%d state=%u\n",
+                       slp_item_name(it->type_id), it->type_id, it->spawn_id,
+                       it->x, it->y, it->x_vel, it->y_vel, it->owner,
+                       it->state);
+            }
+            any = true;
+        }
+
+        const slp_fod_platform_t *fod0 = slp_fod_at(&r, fn, 0);
+        const slp_fod_platform_t *fod1 = slp_fod_at(&r, fn, 1);
+        if (fod0) printf("  FOD platform R h=%7.2f\n", fod0->height);
+        if (fod1) printf("  FOD platform L h=%7.2f\n", fod1->height);
+        const slp_whispy_blow_t *w = slp_whispy_at(&r, fn);
+        if (w) printf("  Whispy dir=%u\n", w->direction);
+        const slp_stadium_transform_t *st = slp_stadium_at(&r, fn);
+        if (st) printf("  Stadium event=%u type=%u\n", st->event, st->type);
+
         if (any) printf("\n");
     }
 

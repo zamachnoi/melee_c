@@ -1,15 +1,35 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -O2 -g
+CPPFLAGS ?= -Isrc
 
-all: melee
+BIN := bin
+BUILD := build
 
-melee: main.c parser.c parser.h
-	$(CC) $(CFLAGS) -o $@ main.c parser.c
+all: $(BIN)/melee $(BIN)/test_rollback
 
-run: melee
-	./melee fixtures/vertical.slp
+$(BIN)/melee: $(BUILD)/main.o $(BUILD)/parser.o
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(BIN)/test_rollback: $(BUILD)/test_rollback.o $(BUILD)/parser.o
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(BUILD)/%.o: src/%.c src/parser.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(BUILD)/test_rollback.o: tests/test_rollback.c src/parser.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+test: $(BIN)/test_rollback
+	$(BIN)/test_rollback
+
+run: $(BIN)/melee
+	$(BIN)/melee fixtures/vertical.slp
 
 clean:
-	rm -f melee
+	rm -rf $(BIN) $(BUILD)
 
-.PHONY: all run clean
+.PHONY: all test run clean

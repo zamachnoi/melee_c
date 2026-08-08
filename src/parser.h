@@ -91,6 +91,44 @@ typedef struct {
 } slp_slot_t;
 
 typedef struct {
+    uint32_t spawn_id;
+    int32_t frame_number;
+    uint16_t type_id;
+    uint8_t state;
+    float facing;
+    float x_vel, y_vel;
+    float x, y;
+    uint16_t damage_taken;
+    float expiration_timer;
+    uint8_t misc[4];
+    int8_t owner;
+    uint16_t instance_id;
+} slp_item_t;
+
+typedef struct {
+    slp_item_t *items;
+    size_t count;
+    size_t cap;
+} slp_item_list_t;
+
+typedef struct {
+    int32_t frame_number;
+    uint8_t platform; /* 0 = right, 1 = left */
+    float height;
+} slp_fod_platform_t;
+
+typedef struct {
+    int32_t frame_number;
+    uint8_t direction; /* 0 = none, 1 = left, 2 = right */
+} slp_whispy_blow_t;
+
+typedef struct {
+    int32_t frame_number;
+    uint16_t event; /* 2 init ... 6 finalize, 0 finished */
+    uint16_t type;  /* 3 fire, 4 grass, 5 normal, 6 rock, 9 water */
+} slp_stadium_transform_t;
+
+typedef struct {
     slp_game_start_t game_start;
     bool have_game_start;
     slp_slot_t slots[SLP_SLOT_COUNT];
@@ -99,6 +137,23 @@ typedef struct {
     char start_at[64];
     char played_on[16];
     size_t frame_count; /* max committed frame count across slots */
+
+    /* one item list per frame index (rollback-safe: list replaced each
+       bookend so the most recent version of a frame wins) */
+    slp_item_list_t *frame_items;
+    size_t frame_items_count;
+    size_t frame_items_cap;
+
+    /* stage events, one slot per frame index (overwrite = latest wins) */
+    slp_fod_platform_t *fod;      /* index = frame_index * 2 + platform */
+    size_t fod_count;
+    size_t fod_cap;
+    slp_whispy_blow_t *whispy;    /* index = frame_index */
+    size_t whispy_count;
+    size_t whispy_cap;
+    slp_stadium_transform_t *stadium; /* index = frame_index */
+    size_t stadium_count;
+    size_t stadium_cap;
 } slp_replay_t;
 
 slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out);
@@ -107,9 +162,18 @@ void slp_replay_free(slp_replay_t *r);
 slp_frame_t *slp_frame_at(slp_replay_t *r, unsigned port, bool follower,
                           int32_t frame_number);
 
+slp_item_list_t *slp_items_at(slp_replay_t *r, int32_t frame_number);
+const slp_fod_platform_t *slp_fod_at(slp_replay_t *r, int32_t frame_number,
+                                     unsigned platform);
+const slp_whispy_blow_t *slp_whispy_at(slp_replay_t *r, int32_t frame_number);
+const slp_stadium_transform_t *slp_stadium_at(slp_replay_t *r,
+                                              int32_t frame_number);
+
 const char *slp_character_name(uint8_t internal_id);
 const char *slp_stage_name(uint16_t stage_id);
+const char *slp_item_name(uint16_t type_id);
 const char *slp_error_string(slp_error_t e);
+uint8_t slp_external_to_internal(uint8_t external_id);
 
 #ifdef __cplusplus
 }

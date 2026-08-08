@@ -31,6 +31,25 @@ static inline bool in_range(size_t pos, size_t n, size_t need) {
     return need <= n && pos + need <= n;
 }
 
+/* frame_number -> array index (frame -123 is index 0) */
+static inline size_t frame_index(int32_t fn) {
+    int64_t idx = (int64_t)fn + SLP_FRAME_BASE;
+    return idx < 0 ? 0 : (size_t)idx;
+}
+
+/* Grows *ptr (element size elem) to hold `need` entries. */
+static slp_error_t grow_array(void **ptr, size_t *cap, size_t elem,
+                              size_t need) {
+    size_t nc = *cap ? *cap : 16;
+    if (*ptr && nc >= need) return SLP_OK;
+    while (nc < need) nc *= 2;
+    void *p = realloc(*ptr, nc * elem);
+    if (!p) return SLP_ERR_OUT_OF_MEMORY;
+    *ptr = p;
+    *cap = nc;
+    return SLP_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* UBJSON metadata helpers                                             */
 /* ------------------------------------------------------------------ */
@@ -233,11 +252,17 @@ static slp_error_t skip_value(const uint8_t *p, size_t n, size_t *pos,
 }
 
 /*
- * Walks the top-level metadata object, extracting the fields the basic
- * parser cares about. Unknown values are skipped.
+ * Reads the `metadata` key/value pair from the outer document object.
+ * `pos` points at the key's string marker. Extracts the fields the basic
+ * parser cares about; unknown values are skipped.
  */
 static slp_error_t parse_metadata(const uint8_t *p, size_t n, size_t *pos,
                                   slp_replay_t *out) {
+    char key[64];
+    slp_error_t e = read_string(p, n, pos, key, sizeof key);
+    if (e != SLP_OK) return e;
+    if (strcmp(key, "metadata") != 0) return SLP_ERR_MISSING_METADATA;
+
     if (*pos >= n || p[*pos] != '{') return SLP_ERR_MISSING_METADATA;
     (*pos)++;
 
@@ -247,8 +272,7 @@ static slp_error_t parse_metadata(const uint8_t *p, size_t n, size_t *pos,
             (*pos)++;
             return SLP_OK;
         }
-        char key[64];
-        slp_error_t e = read_string(p, n, pos, key, sizeof key);
+        e = read_string(p, n, pos, key, sizeof key);
         if (e != SLP_OK) return e;
 
         if (*pos >= n) return SLP_ERR_MISSING_METADATA;
@@ -434,6 +458,56 @@ static void decode_post(const uint8_t *p, size_t n, slp_frame_t *f) {
     }
 }
 
+static void decode_item(const uint8_t *p, size_t n, slp_item_t *it) {
+    memset(it, 0, sizeof *it);
+    it->frame_number = rd_i32be(p + 1);
+    if (n >= 0x7) {
+        it->type_id = rd_u16be(p + 0x5);
+        it->state = p[0x7];
+    }
+    if (n >= 0x20) {
+        it->facing = rd_f32(p + 0x8);
+        it->x_vel = rd_f32(p + 0xC);
+        it->y_vel = rd_f32(p + 0x10);
+        it->x = rd_f32(p + 0x14);
+        it->y = rd_f32(p + 0x18);
+        it->damage_taken = rd_u16be(p + 0x1C);
+        it->expiration_timer = rd_f32(p + 0x1E);
+    }
+    if (n >= 0x26) it->spawn_id = rd_u32be(p + 0x22);
+    if (n >= 0x2B) {
+        it->misc[0] = p[0x26];
+        it->misc[1] = p[0x27];
+        it->misc[2] = p[0x28];
+        it->misc[3] = p[0x29];
+    }
+    if (n >= 0x2C) it->owner = (int8_t)p[0x2A];
+    if (n >= 0x2D) it->instance_id = rd_u16be(p + 0x2B);
+}
+
+static void decode_fod(const uint8_t *p, size_t n, slp_fod_platform_t *e) {
+    memset(e, 0, sizeof *e);
+    e->frame_number = rd_i32be(p + 1);
+    e->platform = p[0x5];
+    if (n >= 0xA) e->height = rd_f32(p + 0x6);
+}
+
+static void decode_whispy(const uint8_t *p, size_t n, slp_whispy_blow_t *e) {
+    memset(e, 0, sizeof *e);
+    e->frame_number = rd_i32be(p + 1);
+    if (n >= 0x6) e->direction = p[0x5];
+}
+
+static void decode_stadium(const uint8_t *p, size_t n,
+                           slp_stadium_transform_t *e) {
+    memset(e, 0, sizeof *e);
+    e->frame_number = rd_i32be(p + 1);
+    if (n >= 0x9) {
+        e->event = rd_u16be(p + 0x5);
+        e->type = rd_u16be(p + 0x7);
+    }
+}
+
 static inline unsigned slot_index(const slp_frame_t *f) {
     return (unsigned)f->player_index * 2 + (unsigned)f->is_follower;
 }
@@ -460,14 +534,97 @@ static slp_error_t commit_frame(slp_replay_t *out, unsigned slot,
     slp_slot_t *s = &out->slots[slot];
     if (!s->active) return SLP_OK;
 
-    int64_t idx = (int64_t)frame_number + SLP_FRAME_BASE;
-    if (idx < 0) idx = 0;
-    slp_error_t e = slot_grow(s, (size_t)idx + 1);
+    size_t idx = frame_index(frame_number);
+    slp_error_t e = slot_grow(s, idx + 1);
     if (e != SLP_OK) return e;
 
     memcpy(&s->frames[idx], &out->pending[slot], sizeof(slp_frame_t));
-    if ((size_t)idx + 1 > s->count) s->count = (size_t)idx + 1;
+    if (idx + 1 > s->count) s->count = idx + 1;
     if (s->count > out->frame_count) out->frame_count = s->count;
+    return SLP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Item events                                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Pending items track the most recent state per spawn_id as the file is
+ * read. On a frame bookend, every pending item whose frame matches is
+ * snapshotted into that frame's item list (replacing any earlier version,
+ * so the most recent frame wins).
+ */
+
+static slp_item_t *pending_find(const slp_item_t *pending, size_t count,
+                                uint32_t spawn_id) {
+    for (size_t i = 0; i < count; i++)
+        if (pending[i].spawn_id == spawn_id) return (slp_item_t *)&pending[i];
+    return NULL;
+}
+
+static slp_error_t pending_upsert(slp_item_t **pending, size_t *count,
+                                  size_t *cap, const slp_item_t *item) {
+    slp_item_t *cur = pending_find(*pending, *count, item->spawn_id);
+    if (cur) {
+        *cur = *item;
+        return SLP_OK;
+    }
+    slp_error_t e = grow_array((void **)pending, cap, sizeof(slp_item_t),
+                               *count + 1);
+    if (e != SLP_OK) return e;
+    (*pending)[(*count)++] = *item;
+    return SLP_OK;
+}
+
+static slp_error_t commit_items(slp_replay_t *out, const slp_item_t *pending,
+                                size_t pending_count, int32_t fn) {
+    size_t idx = frame_index(fn);
+
+    if (idx >= out->frame_items_count) {
+        slp_error_t e = grow_array((void **)&out->frame_items,
+                                   &out->frame_items_cap,
+                                   sizeof(slp_item_list_t), idx + 1);
+        if (e != SLP_OK) return e;
+        size_t old = out->frame_items_count;
+        out->frame_items_count = idx + 1;
+        memset(out->frame_items + old, 0,
+               (out->frame_items_count - old) * sizeof(slp_item_list_t));
+    }
+
+    size_t count = 0;
+    for (size_t i = 0; i < pending_count; i++)
+        if (pending[i].frame_number == fn) count++;
+
+    slp_item_list_t *list = &out->frame_items[idx];
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->cap = 0;
+
+    if (count == 0) return SLP_OK;
+    slp_item_t *items = malloc(count * sizeof(slp_item_t));
+    if (!items) return SLP_ERR_OUT_OF_MEMORY;
+    size_t j = 0;
+    for (size_t i = 0; i < pending_count; i++)
+        if (pending[i].frame_number == fn) items[j++] = pending[i];
+    list->items = items;
+    list->count = j;
+    list->cap = j;
+    return SLP_OK;
+}
+
+/*
+ * Stage events are sparse, one slot per frame index. Overwriting the slot
+ * on each event gives the most recent value for a frame (rollback-safe).
+ */
+static slp_error_t stage_event_set(void **arr, size_t *count, size_t *cap,
+                                   size_t elem, size_t idx) {
+    slp_error_t e = grow_array(arr, cap, elem, idx + 1);
+    if (e != SLP_OK) return e;
+    if (*count <= idx) {
+        memset((uint8_t *)*arr + *count * elem, 0, (idx + 1 - *count) * elem);
+        *count = idx + 1;
+    }
     return SLP_OK;
 }
 
@@ -498,32 +655,41 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
     e = parse_metadata(data, len, &meta_pos, out);
     if (e != SLP_OK) return e;
 
+    /* pending items, keyed by spawn_id, tracking current frame state */
+    slp_item_t *pending = NULL;
+    size_t pending_count = 0, pending_cap = 0;
+    bool failed = false;
+    slp_error_t err = SLP_OK;
+
     while (pos < n) {
         uint8_t code = raw[pos];
         pos++;
         int32_t sz = sizes[code];
         if (sz < 0) {
-            slp_replay_free(out);
-            return SLP_ERR_UNKNOWN_PAYLOAD_SIZE;
+            err = SLP_ERR_UNKNOWN_PAYLOAD_SIZE;
+            failed = true;
+            break;
         }
         if ((size_t)sz > n - pos) {
-            slp_replay_free(out);
-            return SLP_ERR_TRUNCATED_EVENT;
+            err = SLP_ERR_TRUNCATED_EVENT;
+            failed = true;
+            break;
         }
-        const uint8_t *p = raw + pos;
+        const uint8_t *event = raw + pos - 1; /* includes command byte */
+        size_t evlen = (size_t)sz + 1;
         pos += (size_t)sz;
 
         switch (code) {
             case 0x36:
                 if (!out->have_game_start) {
-                    decode_game_start(p, (size_t)sz, &out->game_start);
+                    decode_game_start(event, evlen, &out->game_start);
                     out->have_game_start = true;
                 }
                 break;
             case 0x37: {
                 slp_frame_t tmp;
                 memset(&tmp, 0, sizeof tmp);
-                decode_pre(p, (size_t)sz, &tmp);
+                decode_pre(event, evlen, &tmp);
                 out->pending[slot_index(&tmp)] = tmp;
                 out->slots[slot_index(&tmp)].active = true;
                 break;
@@ -531,21 +697,78 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
             case 0x38: {
                 slp_frame_t tmp;
                 memset(&tmp, 0, sizeof tmp);
-                decode_post(p, (size_t)sz, &tmp);
+                decode_post(event, evlen, &tmp);
                 out->pending[slot_index(&tmp)] = tmp;
                 out->slots[slot_index(&tmp)].active = true;
                 break;
             }
+            case 0x3B: {
+                slp_item_t it;
+                decode_item(event, evlen, &it);
+                err = pending_upsert(&pending, &pending_count, &pending_cap,
+                                     &it);
+                if (err != SLP_OK) {
+                    failed = true;
+                    break;
+                }
+                break;
+            }
+            case 0x3F: {
+                slp_fod_platform_t e_;
+                decode_fod(event, evlen, &e_);
+                size_t idx = frame_index(e_.frame_number) * 2 + e_.platform;
+                err = stage_event_set((void **)&out->fod, &out->fod_count,
+                                      &out->fod_cap, sizeof(slp_fod_platform_t),
+                                      idx);
+                if (err != SLP_OK) {
+                    failed = true;
+                    break;
+                }
+                out->fod[idx] = e_;
+                break;
+            }
+            case 0x40: {
+                slp_whispy_blow_t e_;
+                decode_whispy(event, evlen, &e_);
+                size_t idx = frame_index(e_.frame_number);
+                err = stage_event_set((void **)&out->whispy,
+                                      &out->whispy_count, &out->whispy_cap,
+                                      sizeof(slp_whispy_blow_t), idx);
+                if (err != SLP_OK) {
+                    failed = true;
+                    break;
+                }
+                out->whispy[idx] = e_;
+                break;
+            }
+            case 0x41: {
+                slp_stadium_transform_t e_;
+                decode_stadium(event, evlen, &e_);
+                size_t idx = frame_index(e_.frame_number);
+                err = stage_event_set((void **)&out->stadium,
+                                      &out->stadium_count, &out->stadium_cap,
+                                      sizeof(slp_stadium_transform_t), idx);
+                if (err != SLP_OK) {
+                    failed = true;
+                    break;
+                }
+                out->stadium[idx] = e_;
+                break;
+            }
             case 0x3C: { /* frame bookend */
-                int32_t fn = rd_i32be(p + 1);
+                int32_t fn = rd_i32be(event + 1);
                 for (unsigned i = 0; i < SLP_SLOT_COUNT; i++) {
                     if (!out->slots[i].active) continue;
                     if (out->pending[i].frame_number != fn) continue;
-                    e = commit_frame(out, i, fn);
-                    if (e != SLP_OK) {
-                        slp_replay_free(out);
-                        return e;
+                    err = commit_frame(out, i, fn);
+                    if (err != SLP_OK) {
+                        failed = true;
+                        break;
                     }
+                }
+                if (!failed) {
+                    err = commit_items(out, pending, pending_count, fn);
+                    if (err != SLP_OK) failed = true;
                 }
                 break;
             }
@@ -554,9 +777,16 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
             default:
                 break;
         }
+        if (failed) break;
     }
 
 done:
+    free(pending);
+    if (failed) {
+        slp_replay_free(out);
+        return err;
+    }
+
     /* Flush pending frames that never saw a bookend (older files). */
     for (unsigned i = 0; i < SLP_SLOT_COUNT; i++) {
         if (!out->slots[i].active) continue;
@@ -577,6 +807,16 @@ void slp_replay_free(slp_replay_t *r) {
         r->slots[i].frames = NULL;
         r->slots[i].cap = 0;
     }
+    for (size_t i = 0; i < r->frame_items_count; i++)
+        free(r->frame_items[i].items);
+    free(r->frame_items);
+    free(r->fod);
+    free(r->whispy);
+    free(r->stadium);
+    r->frame_items = NULL;
+    r->fod = NULL;
+    r->whispy = NULL;
+    r->stadium = NULL;
 }
 
 slp_frame_t *slp_frame_at(slp_replay_t *r, unsigned port, bool follower,
@@ -585,9 +825,35 @@ slp_frame_t *slp_frame_at(slp_replay_t *r, unsigned port, bool follower,
     unsigned slot = port * 2 + (follower ? 1u : 0u);
     slp_slot_t *s = &r->slots[slot];
     if (!s->active || !s->frames) return NULL;
-    int64_t idx = (int64_t)frame_number + SLP_FRAME_BASE;
-    if (idx < 0 || (size_t)idx >= s->count) return NULL;
+    size_t idx = frame_index(frame_number);
+    if (idx >= s->count) return NULL;
     return &s->frames[idx];
+}
+
+slp_item_list_t *slp_items_at(slp_replay_t *r, int32_t frame_number) {
+    size_t idx = frame_index(frame_number);
+    if (idx >= r->frame_items_count) return NULL;
+    return &r->frame_items[idx];
+}
+
+const slp_fod_platform_t *slp_fod_at(slp_replay_t *r, int32_t frame_number,
+                                     unsigned platform) {
+    size_t idx = frame_index(frame_number) * 2 + platform;
+    if (idx >= r->fod_count) return NULL;
+    return &r->fod[idx];
+}
+
+const slp_whispy_blow_t *slp_whispy_at(slp_replay_t *r, int32_t frame_number) {
+    size_t idx = frame_index(frame_number);
+    if (idx >= r->whispy_count) return NULL;
+    return &r->whispy[idx];
+}
+
+const slp_stadium_transform_t *slp_stadium_at(slp_replay_t *r,
+                                              int32_t frame_number) {
+    size_t idx = frame_index(frame_number);
+    if (idx >= r->stadium_count) return NULL;
+    return &r->stadium[idx];
 }
 
 /* ------------------------------------------------------------------ */
@@ -631,6 +897,68 @@ const char *slp_character_name(uint8_t id) {
 const char *slp_stage_name(uint16_t id) {
     for (size_t i = 0; i < sizeof stage_names / sizeof stage_names[0]; i++)
         if (stage_names[i].id == id) return stage_names[i].name;
+    return "?";
+}
+
+uint8_t slp_external_to_internal(uint8_t ext) {
+    static const uint8_t map[26] = {
+        /*  0 */ 2,  /* CaptainFalcon */
+        /*  1 */ 3,  /* DonkeyKong    */
+        /*  2 */ 1,  /* Fox           */
+        /*  3 */ 24, /* MrGameAndWatch*/
+        /*  4 */ 4,  /* Kirby         */
+        /*  5 */ 5,  /* Bowser        */
+        /*  6 */ 6,  /* Link          */
+        /*  7 */ 17, /* Luigi         */
+        /*  8 */ 0,  /* Mario         */
+        /*  9 */ 18, /* Marth         */
+        /* 10 */ 16, /* Mewtwo        */
+        /* 11 */ 8,  /* Ness          */
+        /* 12 */ 9,  /* Peach         */
+        /* 13 */ 12, /* Pikachu       */
+        /* 14 */ 10, /* Popo          */
+        /* 15 */ 15, /* Jigglypuff    */
+        /* 16 */ 13, /* Samus         */
+        /* 17 */ 14, /* Yoshi         */
+        /* 18 */ 19, /* Zelda         */
+        /* 19 */ 7,  /* Sheik         */
+        /* 20 */ 22, /* Falco         */
+        /* 21 */ 20, /* YoungLink     */
+        /* 22 */ 21, /* DrMario       */
+        /* 23 */ 26, /* Roy           */
+        /* 24 */ 23, /* Pichu         */
+        /* 25 */ 25, /* Ganondorf     */
+    };
+    return ext < 26 ? map[ext] : 0xFF;
+}
+
+static const struct {
+    uint16_t id;
+    const char *name;
+} item_names[] = {
+    {0x00, "Capsule"},           {0x01, "Box"},
+    {0x02, "Barrel"},            {0x03, "Egg"},
+    {0x04, "Party Ball"},        {0x05, "Barrel Cannon"},
+    {0x06, "Bob-omb"},           {0x07, "Mr. Saturn"},
+    {0x08, "Heart Container"},   {0x09, "Maxim Tomato"},
+    {0x0A, "Starman"},           {0x0B, "Home Run Bat"},
+    {0x0C, "Beam Sword"},        {0x0D, "Parasol"},
+    {0x0E, "Green Shell"},       {0x0F, "Red Shell"},
+    {0x10, "Ray Gun"},           {0x11, "Freezie"},
+    {0x12, "Food"},              {0x13, "Motion Sensor Bomb"},
+    {0x14, "Flipper"},           {0x15, "Super Scope"},
+    {0x16, "Star Rod"},          {0x17, "Lip's Stick"},
+    {0x18, "Fan"},               {0x19, "Fire Flower"},
+    {0x1A, "Super Mushroom"},    {0x1B, "Poison Mushroom"},
+    {0x1C, "Hammer"},            {0x1D, "Warp Star"},
+    {0x1E, "Screw Attack"},      {0x1F, "Bunny Hood"},
+    {0x20, "Metal Box"},         {0x21, "Cloaking Device"},
+    {0x22, "Poke Ball"},
+};
+
+const char *slp_item_name(uint16_t id) {
+    for (size_t i = 0; i < sizeof item_names / sizeof item_names[0]; i++)
+        if (item_names[i].id == id) return item_names[i].name;
     return "?";
 }
 
