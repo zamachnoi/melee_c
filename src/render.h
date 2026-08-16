@@ -12,6 +12,11 @@ uint32_t render_find_action(const asset_anims_t *a, const char *name);
 int render_pose_bounds(const asset_model_t *m, const asset_anims_t *a,
                        uint32_t action_idx, float frame, float bounds[4]);
 
+/* Bounds in the side-view projection used during replay playback (Z/Y). */
+int render_pose_profile_bounds(const asset_model_t *m, const asset_anims_t *a,
+                               uint32_t action_idx, float frame,
+                               float bounds[4]);
+
 size_t render_pose(const asset_model_t *m, const asset_anims_t *a,
                    uint32_t action_idx, float frame, int facing,
                    float scale, float tx, float ty,

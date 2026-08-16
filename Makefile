@@ -5,7 +5,7 @@ CPPFLAGS ?= -Isrc
 BIN := bin
 BUILD := build
 
-all: $(BIN)/melee $(BIN)/test_rollback $(BIN)/viewer $(BIN)/test_asset $(BIN)/test_render $(BIN)/extract_tool
+all: $(BIN)/melee $(BIN)/test_rollback $(BIN)/viewer $(BIN)/test_asset $(BIN)/test_render $(BIN)/test_pose $(BIN)/extract_tool
 
 $(BIN)/melee: $(BUILD)/main.o $(BUILD)/parser.o
 	@mkdir -p $(BIN)
@@ -20,6 +20,10 @@ $(BIN)/test_asset: tests/test_asset.c src/asset.c src/render.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
 
 $(BIN)/test_render: tests/test_render.c src/asset.c src/render.c
+	@mkdir -p $(BIN)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
+
+$(BIN)/test_pose: tests/test_pose.c src/asset.c src/render.c
 	@mkdir -p $(BIN)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
 
@@ -45,8 +49,9 @@ $(BIN)/datdump: tools/extract/datdump.c
 
 datdump: $(BIN)/datdump
 
-test: $(BIN)/test_rollback
+test: $(BIN)/test_rollback $(BIN)/test_pose
 	$(BIN)/test_rollback
+	$(BIN)/test_pose
 
 cache: $(BIN)/extract_tool
 	@rm -rf cache && mkdir -p cache
