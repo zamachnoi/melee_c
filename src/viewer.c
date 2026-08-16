@@ -33,10 +33,16 @@
 
 #include <zlib.h>
 
+#include "asset.h"
 #include "parser.h"
+#include "render.h"
 
 #define FB_W 960
 #define FB_H 540
+
+#ifndef ASSET_DIR
+#define ASSET_DIR "cache"
+#endif
 
 typedef struct {
     uint8_t r, g, b, a;
@@ -50,6 +56,10 @@ typedef struct {
 typedef struct {
     slp_replay_t replay;
     cam_t cam;
+    asset_model_t *models[SLP_SLOT_COUNT];
+    asset_anims_t *anims[SLP_SLOT_COUNT];
+    asset_stage_t *stage;
+    uint8_t *stage_fb;
     int32_t start_frame;
     int32_t last_frame;
     char name[256];
@@ -59,6 +69,11 @@ static active_t g_active;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_fb[FB_W * FB_H * 4];
 static char g_dir[1024] = "./replays";
+
+static const char *asset_dir(void) {
+    const char *dir = getenv("ASSET_DIR");
+    return dir && dir[0] ? dir : ASSET_DIR;
+}
 
 /* ------------------------------------------------------------------ */
 /* Pixel helpers                                                       */
@@ -113,6 +128,15 @@ static void world_to_screen(const cam_t *cam, double wx, double wy, int *sx,
 }
 
 static void compute_camera(slp_replay_t *r, cam_t *cam) {
+    /* Final Destination's gameplay camera is intentionally stable.  A
+       replay-wide fit includes off-screen deaths and makes the actual match
+       tiny, so frame the legal play space instead. */
+    if (r->game_start.stage_id == 32) {
+        cam->scale = 4.60;
+        cam->cx = 0.0;
+        cam->cy = 35.0;
+        return;
+    }
     double minx = INFINITY, maxx = -INFINITY;
     double miny = INFINITY, maxy = -INFINITY;
     for (unsigned s = 0; s < SLP_SLOT_COUNT; s++) {
@@ -135,6 +159,62 @@ static void compute_camera(slp_replay_t *r, cam_t *cam) {
     cam->scale = fmin(FB_W / sx, FB_H / sy) * 0.9;
     cam->cx = (minx + maxx) / 2.0;
     cam->cy = (miny + maxy) / 2.0;
+}
+
+static void free_scene_assets(active_t *a) {
+    for (unsigned i = 0; i < SLP_SLOT_COUNT; i++) {
+        asset_model_free(a->models[i]);
+        asset_anims_free(a->anims[i]);
+        a->models[i] = NULL;
+        a->anims[i] = NULL;
+    }
+    asset_stage_free(a->stage);
+    a->stage = NULL;
+    free(a->stage_fb);
+    a->stage_fb = NULL;
+}
+
+static void character_slug(uint8_t id, char *out, size_t cap) {
+    const char *name = slp_character_name(id);
+    size_t n = 0;
+    for (; *name && n + 1 < cap; name++) {
+        unsigned char c = (unsigned char)*name;
+        if (isalnum(c)) out[n++] = (char)tolower(c);
+        else if (n && out[n - 1] != '_') out[n++] = '_';
+    }
+    while (n && out[n - 1] == '_') n--;
+    out[n] = '\0';
+}
+
+static void load_scene_assets(active_t *a) {
+    const slp_game_start_t *gs = &a->replay.game_start;
+    for (unsigned slot = 0; slot < SLP_SLOT_COUNT; slot++) {
+        unsigned port = slot / 2;
+        slp_slot_t *frames = &a->replay.slots[slot];
+        if (!gs->has_player[port] || !frames->active || !frames->count) continue;
+        const slp_frame_t *sample = NULL;
+        for (size_t i = 0; i < frames->count; i++) {
+            if (frames->frames[i].frame_number != 0 || frames->frames[i].character_id) {
+                sample = &frames->frames[i];
+                break;
+            }
+        }
+        if (!sample) continue;
+        char slug[64], model_path[512], anim_path[512];
+        character_slug(sample->character_id, slug, sizeof slug);
+        unsigned costume = gs->costume_index[port];
+        snprintf(model_path, sizeof model_path, "%s/%s-%u.model",
+                 asset_dir(), slug, costume);
+        snprintf(anim_path, sizeof anim_path, "%s/%s-%u.anims",
+                 asset_dir(), slug, costume);
+        a->models[slot] = asset_model_load(model_path);
+        a->anims[slot] = asset_anims_load(anim_path);
+    }
+    if (gs->stage_id == 32) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/fd.stage", asset_dir());
+        a->stage = asset_stage_load(path);
+    }
 }
 
 /* Stage half-widths so the ground bar spans roughly the right width. */
@@ -186,6 +266,56 @@ static void draw_stage(const slp_game_start_t *gs, const cam_t *cam) {
     }
 }
 
+static void build_stage_frame(active_t *a) {
+    free(a->stage_fb);
+    a->stage_fb = malloc(sizeof g_fb);
+    if (!a->stage_fb) return;
+
+    /* Space backdrop.  The extracted FD model supplies the platform and its
+       textured scenery; this restrained gradient keeps transparent regions
+       readable without competing with the match. */
+    for (int y = 0; y < FB_H; y++) {
+        float t = (float)y / (float)(FB_H - 1);
+        uint8_t r = (uint8_t)(5 + 19 * t);
+        uint8_t g = (uint8_t)(7 + 12 * t);
+        uint8_t b = (uint8_t)(18 + 28 * t);
+        for (int x = 0; x < FB_W; x++) {
+            uint8_t *p = &a->stage_fb[(y * FB_W + x) * 4];
+            p[0] = r; p[1] = g; p[2] = b; p[3] = 255;
+        }
+    }
+    uint32_t seed = 0x4D454C45u;
+    for (int i = 0; i < 150; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        int x = (int)(seed % FB_W);
+        seed = seed * 1664525u + 1013904223u;
+        int y = (int)(seed % (FB_H * 3 / 4));
+        uint8_t *p = &a->stage_fb[(y * FB_W + x) * 4];
+        uint8_t glow = (uint8_t)(105 + (seed >> 24) / 2);
+        p[0] = glow; p[1] = glow; p[2] = (uint8_t)(glow + (255 - glow) / 2);
+    }
+
+    if (!a->stage) return;
+    float scale = (float)(a->cam.scale * a->stage->scale);
+    float tx = (float)(FB_W / 2.0 - a->cam.cx * a->cam.scale);
+    float ty = (float)(FB_H / 2.0 + a->cam.cy * a->cam.scale);
+    for (uint32_t i = 0; i < a->stage->section_count; i++) {
+        float bounds[4];
+        if (render_pose_bounds(&a->stage->sections[i], NULL, UINT32_MAX, 0,
+                               bounds) != 0)
+            continue;
+        /* FD sections outside the gameplay mesh are camera-facing 3D sky
+           domes. Orthographically flattening them produces screen-sized
+           black polygons, so use the authored platform/underbody sections
+           and let the 2D backdrop represent the distant scene. */
+        if (bounds[0] < -100.0f || bounds[2] > 100.0f || bounds[3] > 5.0f)
+            continue;
+        render_pose_tilted(&a->stage->sections[i], NULL, UINT32_MAX, 0, 1,
+                           scale, tx, ty, 0.0f, 0.14f,
+                           a->stage_fb, FB_W, FB_H);
+    }
+}
+
 /* Frame rendering
  * ------------------------------------------------------------------ */
 
@@ -197,10 +327,16 @@ static const color_t port_colors[4] = {
 /* Renders the full frame: stage (redrawn every frame for moving stages),
    items, and players. */
 static void render_frame(const active_t *a, int32_t fn) {
-    memset(g_fb, 40, sizeof g_fb); /* dark background */
+    if (a->stage_fb) memcpy(g_fb, a->stage_fb, sizeof g_fb);
+    else {
+        for (int i = 0; i < FB_W * FB_H; i++) {
+            g_fb[i * 4] = 20; g_fb[i * 4 + 1] = 22;
+            g_fb[i * 4 + 2] = 32; g_fb[i * 4 + 3] = 255;
+        }
+    }
 
     const slp_game_start_t *gs = &a->replay.game_start;
-    draw_stage(gs, &a->cam);
+    if (!a->stage) draw_stage(gs, &a->cam);
 
     const slp_item_list_t *items = slp_items_at(&a->replay, fn);
     if (items) {
@@ -208,8 +344,17 @@ static void render_frame(const active_t *a, int32_t fn) {
             const slp_item_t *it = &items->items[i];
             int sx, sy;
             world_to_screen(&a->cam, it->x, it->y, &sx, &sy);
-            fill_rect(sx - 4, sy - 4, sx + 4, sy + 4,
-                      (color_t){255, 255, 180, 220});
+            if (it->type_id == 0x36 || it->type_id == 0x37) {
+                color_t glow = it->type_id == 0x36
+                    ? (color_t){255, 76, 64, 235}
+                    : (color_t){80, 185, 255, 235};
+                int tail = it->x_vel >= 0 ? -14 : 14;
+                draw_line(sx + tail, sy, sx, sy, glow);
+                draw_line(sx + tail / 2, sy - 1, sx, sy - 1,
+                          (color_t){235, 245, 255, 180});
+            } else {
+                fill_circle(sx, sy, 4, (color_t){255, 240, 170, 220});
+            }
         }
     }
 
@@ -224,6 +369,29 @@ static void render_frame(const active_t *a, int32_t fn) {
             int sx, sy;
             world_to_screen(&a->cam, f->x, f->y, &sx, &sy);
 
+            unsigned slot = port * 2u + (unsigned)(pass != 0);
+            const asset_model_t *model = a->models[slot];
+            const asset_anims_t *anims = a->anims[slot];
+            uint32_t action = UINT32_MAX;
+            if (anims && f->animation_index < anims->action_count &&
+                anims->actions[f->animation_index].joint_count)
+                action = f->animation_index;
+            else if (anims)
+                action = render_find_action(anims, "Wait1");
+
+            if (model) {
+                render_pose(model, anims, action, f->anim_frame,
+                            f->facing < 0 ? -1 : 1, (float)a->cam.scale,
+                            (float)sx, (float)sy, g_fb, FB_W, FB_H);
+                if (f->action_state >= 178 && f->action_state <= 182 &&
+                    f->shield_size > 0 && pass == 0) {
+                    double rad = f->shield_size * 0.25 * a->cam.scale;
+                    fill_circle(sx, sy, (int)rad,
+                                (color_t){120, 200, 255, 85});
+                }
+                continue;
+            }
+
             double half_w = 9, half_h = 17;
             if (pass == 1) { half_w = 7; half_h = 13; }
             double px = half_w * a->cam.scale, py = half_h * a->cam.scale;
@@ -234,8 +402,9 @@ static void render_frame(const active_t *a, int32_t fn) {
             fill_rect(sx - rx + 2, sy - ry + 2, sx + rx - 2, sy + ry - 2, col);
 
             /* shield */
-            if (f->shield_size > 0 && pass == 0) {
-                double rad = f->shield_size * 0.8 * a->cam.scale;
+            if (f->action_state >= 178 && f->action_state <= 182 &&
+                f->shield_size > 0 && pass == 0) {
+                double rad = f->shield_size * 0.25 * a->cam.scale;
                 fill_circle(sx, sy, (int)rad,
                             (color_t){120, 200, 255, 110});
             }
@@ -334,14 +503,14 @@ static void send_response(int cfd, const char *ctype, const void *body,
 }
 
 /* Reads request headers into buf. Returns 0 on success. */
-static int read_request(int cfd, char *buf, size_t cap) {
+static ssize_t read_request(int cfd, char *buf, size_t cap) {
     size_t used = 0;
     while (used < cap - 1) {
         ssize_t n = recv(cfd, buf + used, cap - 1 - used, 0);
         if (n <= 0) return -1;
         used += (size_t)n;
         buf[used] = '\0';
-        if (strstr(buf, "\r\n\r\n")) return 0;
+        if (strstr(buf, "\r\n\r\n")) return (ssize_t)used;
     }
     return -1;
 }
@@ -465,6 +634,7 @@ static int load_replay(const char *dir, const char *name) {
     if (e != SLP_OK) return -1;
 
     pthread_mutex_lock(&g_lock);
+    free_scene_assets(&g_active);
     slp_replay_free(&g_active.replay);
     g_active.replay = replay;
     snprintf(g_active.name, sizeof g_active.name, "%s", name);
@@ -474,6 +644,8 @@ static int load_replay(const char *dir, const char *name) {
     if (g_active.last_frame == INT32_MIN)
         g_active.last_frame =
             (int32_t)((int64_t)replay.frame_count - SLP_FRAME_BASE - 1);
+    load_scene_assets(&g_active);
+    build_stage_frame(&g_active);
     pthread_mutex_unlock(&g_lock);
     return 0;
 }
@@ -534,7 +706,7 @@ static void png_chunk(uint8_t *dst, const char *type, const uint8_t *data,
     dst[2] = (uint8_t)(len >> 8);
     dst[3] = (uint8_t)len;
     memcpy(dst + 4, type, 4);
-    memcpy(dst + 8, data, len);
+    if (len) memcpy(dst + 8, data, len);
     uint32_t c = crc32(0L, Z_NULL, 0);
     c = crc32(c, (const Bytef *)type, 4);
     c = crc32(c, data, (uInt)len);
@@ -639,6 +811,71 @@ static void handle_frame(int cfd, const char *query) {
     free(body);
 }
 
+/* GET /api/pose?char=falco&color=0&action=Wait1&frame=30&facing=1
+   Renders the extracted model (bind pose if action omitted) to a PNG. */
+static void handle_pose(int cfd, const char *query) {
+    char cbuf[64] = "falco", abuf[64] = "", fbuf[32] = "0", xbuf[16] = "1", cidx[16] = "0";
+    query_value(query, "char", cbuf, sizeof cbuf);
+    query_value(query, "action", abuf, sizeof abuf);
+    query_value(query, "frame", fbuf, sizeof fbuf);
+    query_value(query, "facing", xbuf, sizeof xbuf);
+    query_value(query, "color", cidx, sizeof cidx);
+    float frame = (float)atof(fbuf);
+    int facing = atoi(xbuf), color = atoi(cidx);
+
+    char mpath[512], apath[512];
+    snprintf(mpath, sizeof mpath, "%s/%s-%d.model", asset_dir(), cbuf, color);
+    snprintf(apath, sizeof apath, "%s/%s-%d.anims", asset_dir(), cbuf, color);
+
+    asset_model_t *m = asset_model_load(mpath);
+    asset_anims_t *a = asset_anims_load(apath);
+    if (!m) {
+        send_response(cfd, "text/plain", "model not cached; run make cache", 33);
+        return;
+    }
+
+    uint32_t aidx = abuf[0] && a ? render_find_action(a, abuf) : UINT32_MAX;
+    if (abuf[0] && aidx == UINT32_MAX) {
+        asset_model_free(m); if (a) asset_anims_free(a);
+        send_response(cfd, "text/plain", "action not found", 16);
+        return;
+    }
+
+    /* Fit the camera to the transformed pose, not the JOBJ-local vertices. */
+    float bounds[4];
+    if (render_pose_bounds(m, a, aidx, frame, bounds) != 0) {
+        asset_model_free(m); if (a) asset_anims_free(a);
+        send_response(cfd, "text/plain", "empty model", 11);
+        return;
+    }
+    float minx = bounds[0], miny = bounds[1];
+    float maxx = bounds[2], maxy = bounds[3];
+    float w = maxx - minx, h = maxy - miny;
+    if (w < 1e-3f) w = 1e-3f;
+    if (h < 1e-3f) h = 1e-3f;
+    float scale = fminf((FB_W * 0.85f) / w, (FB_H * 0.85f) / h);
+    float cx = (minx + maxx) / 2.0f;
+    if (facing < 0) cx = -cx;
+    float tx = FB_W / 2.0f - cx * scale;
+    float ty = FB_H / 2.0f + (miny + maxy) / 2.0f * scale;
+
+    pthread_mutex_lock(&g_lock);
+    memset(g_fb, 40, FB_W * FB_H * 4);
+    for (int i = 0; i < FB_W * FB_H; i++) {
+        g_fb[i*4] = 30; g_fb[i*4+1] = 30; g_fb[i*4+2] = 40; g_fb[i*4+3] = 255;
+    }
+    render_pose(m, a, aidx, frame, facing, scale, tx, ty, g_fb, FB_W, FB_H);
+    pthread_mutex_unlock(&g_lock);
+
+    uint8_t *png;
+    size_t plen = png_encode(g_fb, FB_W, FB_H, &png);
+    if (m) asset_model_free(m);
+    if (a) asset_anims_free(a);
+    if (!plen) { send_response(cfd, "text/plain", "encode error", 12); return; }
+    send_response(cfd, "image/png", png, plen);
+    free(png);
+}
+
 static void handle_info(int cfd) {
     pthread_mutex_lock(&g_lock);
     char buf[4096];
@@ -687,7 +924,8 @@ static void handle_set(int cfd, const char *query) {
     handle_info(cfd);
 }
 
-static void handle_upload(int cfd, const char *query, size_t content_len) {
+static void handle_upload(int cfd, const char *query, size_t content_len,
+                          const char *initial, size_t initial_len) {
     char fname[256];
     if (query_value(query, "f", fname, sizeof fname) != 0) {
         send_response(cfd, "text/plain", "missing f", 9);
@@ -703,7 +941,9 @@ static void handle_upload(int cfd, const char *query, size_t content_len) {
         send_response(cfd, "text/plain", "oom", 3);
         return;
     }
-    if (read_body(cfd, body, content_len) != 0) {
+    if (initial_len > content_len) initial_len = content_len;
+    if (initial_len) memcpy(body, initial, initial_len);
+    if (read_body(cfd, body + initial_len, content_len - initial_len) != 0) {
         free(body);
         send_response(cfd, "text/plain", "bad body", 8);
         return;
@@ -734,7 +974,7 @@ static void handle_upload(int cfd, const char *query, size_t content_len) {
 
 static const char *html_doc =
     "<!doctype html><html><head><meta charset=utf-8>"
-    "<title>SLP Debug Viewer</title><style>"
+    "<title>Melee 2D Replay</title><style>"
     "body{background:#15171c;color:#ddd;font-family:ui-monospace,monospace;"
     "margin:0;padding:12px;text-align:center}"
     "h1{font-size:16px;font-weight:600;margin:0 0 8px;color:#9ab}"
@@ -753,7 +993,7 @@ static const char *html_doc =
     "#frameLabel{font-size:13px;min-width:120px;text-align:left}"
     "#help{color:#666;font-size:11px;margin-top:6px}"
     "</style></head><body>"
-    "<h1>SLP Debug Viewer</h1>"
+    "<h1>Melee 2D Replay</h1>"
     "<div id=wrap><canvas id=cv width=960 height=540></canvas>"
     "<div id=hud></div></div>"
     "<div id=bar>"
@@ -770,10 +1010,10 @@ static const char *html_doc =
     "const sel=document.getElementById('sel'),sl=document.getElementById('slider');"
     "const playBtn=document.getElementById('playBtn'),file=document.getElementById('file');"
     "const fl=document.getElementById('frameLabel'),hud=document.getElementById('hud');"
-    "let info=null,playing=false,cur=0,raf=0,lastT=0,acc=0,seq=0;"
+    "let info=null,playing=false,cur=0,raf=0,lastT=0,acc=0,seq=0,displaying=false;"
     "const pngCache=new Map(),pending=new Map();"
     "let nextFill=0,inflight=0;"
-    "const MAXF=4,PREFETCH=120;"
+    "const MAXF=3,PREFETCH=120;"
     "const W=960,H=540;"
     "const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];"
     "async function fetchReplays(){"
@@ -795,9 +1035,9 @@ static const char *html_doc =
     "function fillCache(){"
     "if(!info)return;"
     "const hi=Math.min(info.last,cur+PREFETCH);"
-    "if(cur>nextFill)nextFill=cur+1;"
+    "if(cur>nextFill)nextFill=cur+2;"
     "while(inflight<MAXF&&nextFill<=hi){"
-    "const n=nextFill++;"
+    "const n=nextFill;nextFill+=2;"
     "if(pngCache.has(n)||pending.has(n))continue;"
     "inflight++;"
     "requestFrame(n).finally(()=>{inflight--;});"
@@ -805,13 +1045,14 @@ static const char *html_doc =
     "}"
     "async function load(name){"
     "const r=await fetch('/api/set?f='+encodeURIComponent(name));info=await r.json();"
-    "pngCache.clear();pending.clear();inflight=0;"
+    "pngCache.clear();pending.clear();inflight=0;displaying=false;seq++;"
     "sl.min=info.start;sl.max=info.last;cur=info.start;sl.value=cur;"
-    "nextFill=cur+1;"
-    "document.title='SLP Debug Viewer - '+info.name;"
+    "nextFill=cur+2;"
+    "document.title='Melee 2D Replay - '+info.name;"
     "await show(cur);"
     "}"
     "async function show(n){"
+    "if(displaying)return;displaying=true;"
     "const my=++seq;"
     "try{"
     "const ab=await requestFrame(n);"
@@ -830,7 +1071,7 @@ static const char *html_doc =
     "`<span style=\"color:#888\"> ${p.state}</span><br>`;"
     "}).join('');"
     "fillCache();"
-    "}catch(e){}"
+    "}catch(e){}finally{displaying=false;}"
     "}"
     "function toggle(){"
     "playing=!playing;playBtn.textContent=playing?'Pause':'Play';"
@@ -841,9 +1082,9 @@ static const char *html_doc =
     "function loop(t){"
     "if(!playing)return;"
     "acc+=t-lastT;lastT=t;"
-    "while(acc>=16&&playing){"
-    "acc-=16;"
-    "if(cur<info.last){cur++;sl.value=cur;show(cur);}"
+    "while(acc>=33&&playing){"
+    "acc-=33;"
+    "if(cur<info.last){cur=Math.min(cur+2,info.last);sl.value=cur;show(cur);}"
     "else{toggle();return;}"
     "}"
     "raf=requestAnimationFrame(loop);"
@@ -886,7 +1127,8 @@ static void *conn_thread(void *arg) {
     struct timeval tv = {30, 0};
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     char req[8192];
-    if (read_request(cfd, req, sizeof req) == 0) {
+    ssize_t req_len = read_request(cfd, req, sizeof req);
+    if (req_len >= 0) {
         char path[256] = "", query[256] = "";
         parse_path_query(req, path, sizeof path, query, sizeof query);
         if (strcmp(path, "/") == 0)
@@ -899,13 +1141,18 @@ static void *conn_thread(void *arg) {
             send_response(cfd, "application/json", buf, (size_t)len);
         } else if (strcmp(path, "/api/frame") == 0)
             handle_frame(cfd, query);
+        else if (strcmp(path, "/api/pose") == 0)
+            handle_pose(cfd, query);
         else if (strcmp(path, "/api/set") == 0)
             handle_set(cfd, query);
         else if (strcmp(path, "/api/upload") == 0) {
             char cl[32] = "0";
             header_value(req, "Content-Length", cl, sizeof cl);
             size_t clen = (size_t)strtoul(cl, NULL, 10);
-            handle_upload(cfd, query, clen);
+            const char *body = strstr(req, "\r\n\r\n");
+            body = body ? body + 4 : req + req_len;
+            size_t have = (size_t)((req + req_len) - body);
+            handle_upload(cfd, query, clen, body, have);
         } else
             send_response(cfd, "text/plain", "not found", 9);
     }
