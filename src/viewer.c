@@ -31,7 +31,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <time.h>
 #include <unistd.h>
 
 #include <zlib.h>
@@ -73,18 +72,6 @@ typedef struct {
     int32_t last_frame;
     char name[256];
 } active_t;
-
-typedef struct {
-    double clear_ms, stage_ms, items_ms, fighters_ms;
-    double json_ms, deflate_ms, pack_ms;
-    size_t compressed_bytes;
-} frame_profile_t;
-
-static double monotonic_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
-}
 
 static active_t g_active;
 static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
@@ -560,9 +547,7 @@ static const color_t port_colors[4] = {
 
 /* Renders the full frame: stage (redrawn every frame for moving stages),
    items, and players. */
-static void render_frame(const active_t *a, int32_t fn, uint8_t *fb,
-                         frame_profile_t *profile) {
-    double mark = monotonic_ms();
+static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
     g_fb = fb;
     if (a->stage_fb) memcpy(g_fb, a->stage_fb, FB_BYTES);
     else {
@@ -571,16 +556,12 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb,
             g_fb[i * 4 + 2] = 32; g_fb[i * 4 + 3] = 255;
         }
     }
-    if (profile) profile->clear_ms = monotonic_ms() - mark;
 
-    mark = monotonic_ms();
     const slp_game_start_t *gs = &a->replay.game_start;
     cam_t cam = gameplay_camera(a, fn);
     if (a->stage) render_stage_model(a, &cam, g_fb);
     else draw_stage(gs, &cam);
-    if (profile) profile->stage_ms = monotonic_ms() - mark;
 
-    mark = monotonic_ms();
     const slp_item_list_t *items = slp_items_at(&a->replay, fn);
     if (items) {
         for (size_t i = 0; i < items->count; i++) {
@@ -600,9 +581,7 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb,
             }
         }
     }
-    if (profile) profile->items_ms = monotonic_ms() - mark;
 
-    mark = monotonic_ms();
     for (unsigned port = 0; port < SLP_MAX_PORTS; port++) {
         if (!gs->has_player[port]) continue;
         color_t col = port_colors[port];
@@ -661,7 +640,6 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb,
                       (color_t){255, 255, 255, 255});
         }
     }
-    if (profile) profile->fighters_ms = monotonic_ms() - mark;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1041,28 +1019,18 @@ static size_t rgba_deflate(const uint8_t *rgba, size_t len, uint8_t **out) {
 /* ------------------------------------------------------------------ */
 
 /* Caller holds g_lock for reading so replay/assets cannot change mid-frame. */
-static int build_frame_body_locked(int32_t fn, uint8_t **out, size_t *out_len,
-                                   frame_profile_t *profile) {
-    if (profile) memset(profile, 0, sizeof(*profile));
+static int build_frame_body_locked(int32_t fn, uint8_t **out, size_t *out_len) {
     uint8_t *fb = malloc(FB_BYTES);
     if (!fb) return -1;
-    render_frame(&g_active, fn, fb, profile);
-    double mark = monotonic_ms();
+    render_frame(&g_active, fn, fb);
     char json[16384];
     frame_json(&g_active, fn, json, sizeof json);
-    if (profile) profile->json_ms = monotonic_ms() - mark;
-    mark = monotonic_ms();
     uint8_t *pixels;
     size_t pixels_len = rgba_deflate(fb, FB_BYTES, &pixels);
-    if (profile) {
-        profile->deflate_ms = monotonic_ms() - mark;
-        profile->compressed_bytes = pixels_len;
-    }
     free(fb);
     if (!pixels_len) return -1;
     size_t jlen = strlen(json);
     size_t body_len = 4 + jlen + pixels_len;
-    mark = monotonic_ms();
     uint8_t *body = malloc(body_len);
     if (!body) {
         free(pixels);
@@ -1074,7 +1042,6 @@ static int build_frame_body_locked(int32_t fn, uint8_t **out, size_t *out_len,
     body[3] = (uint8_t)jlen;
     memcpy(body + 4, json, jlen);
     memcpy(body + 4 + jlen, pixels, pixels_len);
-    if (profile) profile->pack_ms = monotonic_ms() - mark;
     free(pixels);
     *out = body;
     *out_len = body_len;
@@ -1096,7 +1063,7 @@ static void handle_frame(int cfd, const char *query) {
     uint8_t *body = NULL;
     size_t body_len = 0;
     pthread_rwlock_rdlock(&g_lock);
-    int result = build_frame_body_locked(fn, &body, &body_len, NULL);
+    int result = build_frame_body_locked(fn, &body, &body_len);
     pthread_rwlock_unlock(&g_lock);
     if (result != 0) {
         send_response(cfd, "text/plain", "render error", 12);
@@ -1129,7 +1096,7 @@ static void handle_frames(int cfd, const char *query) {
     for (int i = 0; i < count; i++) {
         uint8_t *body = NULL;
         size_t body_len = 0;
-        if (build_frame_body_locked(first + i, &body, &body_len, NULL) != 0) break;
+        if (build_frame_body_locked(first + i, &body, &body_len) != 0) break;
         size_t need = used + 8 + body_len;
         if (need > cap) {
             size_t next = cap * 2;
@@ -1149,50 +1116,6 @@ static void handle_frames(int cfd, const char *query) {
     put_u32be(batch, (uint32_t)built);
     send_response(cfd, "application/octet-stream", batch, used);
     free(batch);
-}
-
-/* Diagnostic endpoint: measures each server-side phase without transferring
-   frame payloads, so rendering/compression time is separated from network
-   latency. */
-static void handle_profile(int cfd, const char *query) {
-    char fbuf[32] = "0", cbuf[16] = "30";
-    query_value(query, "from", fbuf, sizeof fbuf);
-    query_value(query, "count", cbuf, sizeof cbuf);
-    int32_t first = (int32_t)strtol(fbuf, NULL, 10);
-    int count = atoi(cbuf);
-    if (count < 1) count = 1;
-    if (count > 60) count = 60;
-
-    size_t cap = 32768, used = 0;
-    char *json = malloc(cap);
-    if (!json) { send_response(cfd, "text/plain", "oom", 3); return; }
-    used += (size_t)snprintf(json + used, cap - used,
-                            "{\"from\":%d,\"frames\":[", first);
-    pthread_rwlock_rdlock(&g_lock);
-    for (int i = 0; i < count; i++) {
-        uint8_t *body = NULL;
-        size_t body_len = 0;
-        frame_profile_t p;
-        double start = monotonic_ms();
-        if (build_frame_body_locked(first + i, &body, &body_len, &p) != 0)
-            break;
-        double total = monotonic_ms() - start;
-        free(body);
-        used += (size_t)snprintf(
-            json + used, cap - used,
-            "%s{\"n\":%d,\"clear\":%.3f,\"stage\":%.3f,"
-            "\"items\":%.3f,\"fighters\":%.3f,\"json\":%.3f,"
-            "\"deflate\":%.3f,\"pack\":%.3f,\"total\":%.3f,"
-            "\"bytes\":%zu}",
-            i ? "," : "", first + i, p.clear_ms, p.stage_ms, p.items_ms,
-            p.fighters_ms, p.json_ms, p.deflate_ms, p.pack_ms, total,
-            p.compressed_bytes);
-        if (used >= cap - 512) break;
-    }
-    pthread_rwlock_unlock(&g_lock);
-    used += (size_t)snprintf(json + used, cap - used, "]}");
-    send_response(cfd, "application/json", json, used);
-    free(json);
 }
 
 /* GET /api/pose?char=falco&color=0&action=Wait1&frame=30&facing=1
@@ -1582,8 +1505,6 @@ static void *conn_thread(void *arg) {
             handle_frame(cfd, query);
         else if (strcmp(path, "/api/frames") == 0)
             handle_frames(cfd, query);
-        else if (strcmp(path, "/api/profile") == 0)
-            handle_profile(cfd, query);
         else if (strcmp(path, "/api/pose") == 0)
             handle_pose(cfd, query);
         else if (strcmp(path, "/api/set") == 0)
