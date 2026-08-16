@@ -72,6 +72,7 @@ static active_t g_active;
 static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
 static _Thread_local uint8_t *g_fb;
 static char g_dir[1024] = "./replays";
+static char g_web_dir[1024] = "./web";
 
 static const char *asset_dir(void) {
     const char *dir = getenv("ASSET_DIR");
@@ -1204,8 +1205,39 @@ static const char *html_doc =
     "fetchReplays();"
     "</script></body></html>";
 
+/* Reads an entire file into a malloc'd buffer. Returns NULL on error. */
+static char *read_whole_file(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    rewind(f);
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf); fclose(f); return NULL;
+    }
+    fclose(f);
+    buf[sz] = '\0';
+    *len = (size_t)sz;
+    return buf;
+}
+
+/* Serves web/index.html from disk if present, else the embedded copy.
+   This lets you edit the frontend and just refresh -- no rebuild needed. */
 static void handle_root(int cfd) {
-    send_response(cfd, "text/html; charset=utf-8", html_doc, strlen(html_doc));
+    char path[1400];
+    snprintf(path, sizeof path, "%s/index.html", g_web_dir);
+    size_t len = 0;
+    char *body = read_whole_file(path, &len);
+    if (body) {
+        send_response(cfd, "text/html; charset=utf-8", body, len);
+        free(body);
+    } else {
+        send_response(cfd, "text/html; charset=utf-8", html_doc,
+                      strlen(html_doc));
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1260,6 +1292,9 @@ int main(int argc, char **argv) {
         snprintf(g_dir, sizeof g_dir, "%s", d ? d : "./replays");
     }
     mkdir(g_dir, 0755);
+
+    const char *wd = getenv("WEB_DIR");
+    if (wd) snprintf(g_web_dir, sizeof g_web_dir, "%s", wd);
 
     const char *host = getenv("HOST");
     if (!host) host = "0.0.0.0";

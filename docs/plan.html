@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>melee_c — From ISO to 2D: C extraction + rendering</title>
+<style>
+  :root{
+    --bg:#15171c; --panel:#1d2128; --panel2:#232830; --line:#2c323c;
+    --fg:#d9dee7; --muted:#8a94a6; --accent:#6ea8fe; --accent2:#7ee0a3;
+    --warn:#f6c177; --bad:#f27d8c; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:920px;margin:0 auto;padding:32px 24px 80px}
+  h1{font-size:26px;margin:0 0 4px;letter-spacing:-.5px}
+  .sub{color:var(--muted);font:14px var(--mono);margin-bottom:8px}
+  h2{font-size:19px;margin:44px 0 10px;padding-top:20px;border-top:1px solid var(--line)}
+  h2 .n{color:var(--accent);font-family:var(--mono);margin-right:10px}
+  h3{font-size:15px;margin:22px 0 6px;color:var(--accent2)}
+  p{margin:8px 0}
+  code{font:13px var(--mono);background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--accent2)}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;overflow:auto;font:12.5px var(--mono);line-height:1.5}
+  pre code{background:none;border:none;padding:0;color:var(--fg)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  .pill{display:inline-block;font:11px var(--mono);border-radius:999px;padding:2px 10px;margin:0 6px 4px 0;border:1px solid var(--line);color:var(--muted);background:var(--panel2)}
+  .pill.ok{color:var(--accent2);border-color:#2c3d33}
+  .pill.ref{color:var(--warn);border-color:#4a3d28}
+  .pill.c{color:var(--accent);border-color:#283c59}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);font-family:var(--mono);font-weight:600;color:var(--muted);font-size:12px}
+  tr:nth-child(even) td{background:#191d24}
+  .note{border-left:3px solid var(--warn);background:#221f1a;padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0;font-size:14px}
+  .warnnote{border-left:3px solid var(--bad);background:#241b1e}
+  .oknote{border-left:3px solid var(--accent2);background:#18211c}
+  ul,ol{margin:8px 0 8px 2px;padding-left:22px}
+  li{margin:4px 0}
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:4px 12px;margin:8px 0}
+  .kv b{font-family:var(--mono);font-size:13px;color:var(--accent);font-weight:600}
+  .milestone{display:block;font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:4px}
+  .footer{margin-top:60px;color:var(--muted);font:12px var(--mono);text-align:center}
+  a{color:var(--accent)}
+  blockquote{margin:10px 0;padding:10px 16px;border-left:3px solid var(--accent);background:var(--panel);border-radius:0 8px 8px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>melee_c &rarr; from ISO to 2D: write our own extraction</h1>
+<div class="sub">Goal: render all characters, all stages (2D for now), all animations &middot; Start: <b>Fox + Falco, all action states</b></div>
+<div class="sub">Extract from the ISO: <b>fighters &middot; fighter colours &middot; animations &middot; stages &middot; stage animations</b></div>
+<div class="sub">Direction: <span style="color:var(--bad)">no borrowed Zig code</span> &mdash; original C extraction, Zig/<a href="#sources">other code</a> used only as behavioral reference &middot; Plan: 2026-08-15</div>
+
+<div class="card">
+<blockquote style="margin:0"><b>TL;DR.</b> The end goal is unchanged: a 2D renderer in <code>viewer.c</code> that draws (eventually) every character, costume, and stage, driven by the replay's <code>action_state</code> + <code>anim_frame</code>. What changed is the front half: <b>the first part of this plan is writing a from-scratch C extraction pipeline</b> (<code>tools/extract</code>) that reads the ISO &rarr; FST &rarr; <i>DAT</i> container &rarr; <i>HSD</i> types, and produces cached assets for fighters, fighter colours, animations, stages, and stage animations. We do it in C, as original work: Zig (<code>litewing</code>) is a reference for <i>behavior only</i> &mdash; we study what it does and why, then write our own code. Understanding HSD deeply is a prerequisite, not a side quest.</blockquote>
+</div>
+
+<h2><span class="n">0</span>What exists &amp; what we lean on</h2>
+<div class="kv">
+  <b>~/Dev/fixtures/game.iso</b> <span>1.46 GB Melee ISO &mdash; the source of all assets.</span>
+  <b>melee_c/src/parser.{c,h}</b> <span>Our C .slp parser: per-frame <code>action_state</code>, <code>anim_frame</code>, <code>facing</code>, x/y, character_id, FOD/Whispy/Stadium events.</span>
+  <b>melee_c/src/viewer.c</b> <span>Our C HTTP + software-2D + PNG renderer (browser at melee.zamachnoi.com).</span>
+  <b>litewing (Zig)</b> <span><span class="pill ref">reference only</span> <code>dat-extractor</code> + <code>melee-viewer</code> prove the pipeline works and reveal the hard parts. We read it for behavior <b>and never copy code</b>; it is not a build dependency.</span>
+  <b>Known-good numbers</b> <span>Validation target (Falco): bones=<code>67</code>, primitive_groups=<code>26</code>, textures=<code>24</code>, actions &gt; <code>300</code>. Our extractor must reproduce these independently.</span>
+  <b>Toolchain</b> <span><code>cc 13.3</code> + existing Makefile. No Zig needed to build melee_c.</span>
+</div>
+
+<h3 id="sources">Reference sources (behavior, formats, reverse engineering)</h3>
+<ul>
+  <li><a href="https://smashboards.com/threads/melee-dat-format.292603/">Melee DAT format thread (Smashboards)</a> &mdash; the DAT container layout and naming conventions; ground truth for section/offset formulas.</li>
+  <li><b>HSDLib</b> (UncleDicken) &mdash; strongest public reference for HSD object types (JOBJ/DOBJ/POBJ/MOBJ/TOBJ), scene graph semantics, and HSD-specific math conventions.</li>
+  <li><a href="https://github.com/project-slippi/SlippiRendering">project-slippi/SlippiRendering</a> &mdash; reads DATs directly and renders replays; reference for node classification, geometry decode, materials.</li>
+  <li><b>Dolphin source</b> &mdash; GX/TPL texture formats (I4/I8/RGB5A3/RGBA8/C4/C8 + TLUT) and TEV/lighting conventions.</li>
+  <li>litewing <code>docs/DAT_FILE_LAYOUT.md</code> + <code>USEFUL_LINKS.md</code> &mdash; useful index of the above (read for pointers, not code).</li>
+</ul>
+
+<h2><span class="n">1</span>Architecture</h2>
+<table>
+<tr><th>Concern</th><th>Where it lives</th><th>Language</th><th>Note</th></tr>
+<tr><td>ISO &rarr; cached assets (extraction)</td><td><code>tools/extract</code> in melee_c</td><td><span class="pill c">C</span></td><td>Original implementation. Offline, run on dev box.</td></tr>
+<tr><td>Asset loading</td><td><code>src/asset.{c,h}</code></td><td><span class="pill c">C</span></td><td>Reads the cache produced by extract.</td></tr>
+<tr><td>Pose + 2D raster</td><td><code>src/viewer.c</code> renderer</td><td><span class="pill c">C</span></td><td>Same server, PNG pipeline unchanged.</td></tr>
+<tr><td>Action-state &#8594; animation lookup</td><td><code>src/asset.c</code> (tables)</td><td><span class="pill c">C</span></td><td>Common states + Fox/Falco specials, name &rarr; prefix &rarr; raw-index fallback.</td></tr>
+</table>
+<div class="warnnote"><b>House rule:</b> never <code>git subtree</code>, vendor, or transpile litewing. We implement the same <i>formats</i> with our own structure. Shared facts (offsets, byte layouts from the community thread) are fine to reproduce verbatim &mdash; that's data, not code.</div>
+
+<h3>Data flow</h3>
+<pre><code>game.iso ──[tools/extract: C]──► /data/cache   (versioned, ISO-fingerprinted)
+  │                                  ├─ meta.json                fingerprint, schema ver
+  │  FST ──► DAT bytes ──► HSD       ├─ char/&lt;char&gt;-&lt;colour&gt;.model  bones, prims, verts, tex
+  │                                  ├─ char/&lt;char&gt;-&lt;colour&gt;.anims  action table + figatree tracks
+  │                                  └─ stage/&lt;stage&gt;.stage        sections, scale, camera, stage anims
+master.slp ──[parser.c]──► action_state, anim_frame, facing, x, y
+     │
+     └─[viewer.c render]────────► 4x4 RGBA ──PNG──► browser
+         action_state ─lookup→ animation   anim_frame ─sample→ bones
+         bones ─skin→ verts                x,y,facing ─project→ 2D ─paint</code></pre>
+
+<h2><span class="n">2</span>Phase A &mdash; Understand HSD (the prerequisite)</h2>
+<div class="card">
+<p><b>Goal:</b> a written, precise model of the formats <i>before</i> writing decoder code. This is the milestone that makes extraction possible &mdash; do it properly.</p>
+<ol>
+  <li><b>ISO/FST layer</b> &rarr; <code>docs/DAT.md</code>: GameCube disc structure, FST entries, locating <code>*.dat</code>, reading file bytes.</li>
+  <li><b>DAT container</b> &rarr; same doc: header, data block, relocation table, root/reference node tables, string table, offset rules (<code>0x20 + dataOffset</code>), what root names mean (<code>ftData*</code>, <code>*figatree*</code>, <code>*_joint</code>, <code>coll_data</code>).</li>
+  <li><b>HSD object model</b> &rarr; <code>docs/HSD.md</code>: the scene graph &mdash; <code>JOBJ</code> (joints/bones + transforms), <code>DOBJ</code> (draw objects), <code>POBJ</code> (primitive objects: display lists), <code>MOBJ</code> (materials: color, alpha, TEV), <code>TOBJ</code> (textures: TPL image + wrap/scale), <code>COBJ</code>? (lights/cameras). Enumerate every HSD type we must handle for fighters and stages.</li>
+  <li><b>Geometry</b>: POBJ display-list encoding for Melee's GX subset (primitive types, positions, normals, colors, UVs, skin weights).</li>
+  <li><b>Textures</b>: TPL/CI image formats + TLUT lookup; which fonts/emblem/costume textures live in fighter DATs.</li>
+  <li><b>Animation</b> &rarr; <code>docs/ANIM.md</code>: <code>figatree</code> &mdash; AOBJ-based joint/material/texture tracks, keyframes (constant/step/linear/hermite), track interpolation math; and how the fighter <b>action table</b> (in <code>ftData*</code>, 0x18-byte entries) links to byte slices inside <code>Pl*AJ.dat</code>.</li>
+  <li><b>Stages</b> &rarr; <code>docs/STAGES.md</code>: stage DAT layout (<code>GrNLa</code> = FD &hellip;), sections, camera/scale/lights, and <b>stage animations</b> (platform movement, Whispy, Stadium transforms).</li>
+</ol>
+<p class="milestone">Exit: reading any of these docs + the community DAT thread should let us explain any byte in a Pl*.dat without peeking at Zig sources.</p>
+</div>
+
+<h2><span class="n">3</span>Phase B &mdash; Build the C extractor (<code>tools/extract</code>)</h2>
+<div class="card">
+<p><b>Goal:</b> original C code, module per format layer, each with a tiny self-check.</p>
+<table>
+<tr><th>Module</th><th>Parses / produces</th><th>Self-check</th></tr>
+<tr><td><code>iso.c</code></td><td>FST index; <code>dat_entry(path) -&gt; bytes</code></td><td>Known DAT paths resolve; sizes sane.</td></tr>
+<tr><td><code>dat.c</code></td><td>DAT container &rarr; sections, nodes, names</td><td>Root names match the thread's naming.</td></tr>
+<tr><td><code>hsd_jobj.c</code></td><td>JOBJ tree &rarr; bones, base/inv-bind transforms</td><td>Falco skeleton: <b>67 bones</b>.</td></tr>
+<tr><td><code>hsd_dobj.c</code></td><td>DOBJ/POBJ/MOBJ &rarr; primitive groups, indices, vertices</td><td>Falco: <b>26 prim groups</b>.</td></tr>
+<tr><td><code>texture.c</code></td><td>TOBJ/TLU + GX formats &rarr; RGBA</td><td>Falco: <b>24 textures</b>, decodes to correct palette.</td></tr>
+<tr><td><code>colour.c</code></td><td>costume &#8594; mesh DAT mapping (e.g. <code>PlFxOr/Bu/Gr/Nr</code>) + material swap</td><td>Each costume yields a distinct model.</td></tr>
+<tr><td><code>anim.c</code></td><td>figatree &rarr; joint/material/texture keyframe tracks</td><td>Tracks interpolate identically at known frames.</td></tr>
+<tr><td><code>action.c</code></td><td><code>ftData*</code> action table &#8594; linked <code>Pl*AJ.dat</code> slices</td><td>Falco: <b>&gt;300 actions</b>, <code>Wait1</code> resolves.</td></tr>
+<tr><td><code>stage.c</code></td><td>stage sections, scale, camera, lights, <b>stage animations</b></td><td>FD: scale ~1.0, sections match.</td></tr>
+<tr><td><code>cache.c</code></td><td>serialize all of the above; <code>meta.json</code></td><td>Re-read round-trips byte-identical.</td></tr>
+</table>
+<p class="milestone">Exit: <code>tools/extract</code> reproduces every validation number above with zero Zig in the build. Cache never lands in git.</p>
+</div>
+
+<h2><span class="n">4</span>Phase C &mdash; Renderer (the part our viewer already gestures at)</h2>
+<div class="card">
+<ol>
+  <li><b>Asset loader</b> (<code>src/asset.{c,h}</code>): mmap cache files into runtime structs; validate schema version + ISO fingerprint; load Fox/Falco on startup (<code>ASSET_DIR=/data/cache</code>).</li>
+  <li><b>Pose sampler</b>: <code>action_state</code> &#8594; animation; sample at <code>anim_frame</code> (mind the +1 frame quirk); local &#8594; world transforms; mirror x when <code>facing &lt; 0</code>.</li>
+  <li><b>2D rasterizer</b>: project with the existing side-view camera; painter's-algorithm triangle fill; flat shading from <code>MOBJ</code> colors first, affine <b>texture mapping</b> next.</li>
+  <li><b><code>/api/pose?char=falco&amp;action=Wait1&amp;frame=30&amp;facing=1</code></b> debug endpoint &mdash; iterate on one skeleton before touching playback.</li>
+  <li><b>Wire into <code>/api/frame</code></b>: followers/Nana, 4 ports, same character twice, Zelda/Sheik (key models by <i>internal</i> char id).</li>
+  <li><b>Stages</b>: real stage meshes + stage animations driven by our existing <code>slp_fod_at / slp_whispy_at / slp_stadium_at</code> events.</li>
+  <li><b>Scale</b>: all 26 characters + all costumes; 2.5D perspective + textures; later WebGL 3D is its own project.</li>
+</ol>
+</div>
+
+<h2><span class="n">5</span>Decisions</h2>
+<table>
+<tr><th>#</th><th>Decision</th><th>Resolved</th></tr>
+<tr><td>1</td><td>Who writes the extraction?</td><td><b>Us, in C, original code.</b> Zig is reference-only. No litewing in the build.</td></tr>
+<tr><td>2</td><td>What counts as "copying"?</td><td>Facts/offsets from the community thread = fine verbatim. Structure, idioms, and code = ours. No copy-paste from litewing.</td></tr>
+<tr><td>3</td><td>Cache location</td><td>Dev box <code>/data/cache</code>, versioned + ISO-fingerprinted, never in git.</td></tr>
+<tr><td>4</td><td>First projection</td><td>Side view (matches replay x/y; facing &#8594; mirror).</td></tr>
+<tr><td>5</td><td>Textures in renderer</td><td>Flat-shaded first (silhouettes > accuracy); texture decode still built in Phase B for correctness.</td></tr>
+<tr><td>6</td><td>Costume order</td><td>Default (0) for Fox/Falco first, then all colours.</td></tr>
+</table>
+
+<h2><span class="n">6</span>Risks</h2>
+<ul>
+  <li><b>The reverse-engineering is the schedule</b> &mdash; HSD node classification and GX display-list decoding are fiddly. Phase A is deliberately heavy to cut Phase B surprises.</li>
+  <li><b>ISO version sensitivity</b> &mdash; confirm <code>game.iso</code> is the version the known-good numbers were measured on before trusting them.</li>
+  <li><b>Discipline to not copy</b> &mdash; the threshold (data vs. code) is explicit above; review diffs against that line.</li>
+  <li><b>Perf</b> &mdash; 960&times;540 software triangles + PNG could get slow; client-side <code>pngCache</code> already exists; optimize the triangle filler only if needed.</li>
+  <li><b>Actions without a figatree</b> &mdash; some states have no animation; fall back to Idle/last pose.</li>
+</ul>
+
+<h2><span class="n">7</span>First concrete actions</h2>
+<ol>
+  <li>Write <code>docs/DAT.md</code> + a C ISO/FST &rarr; DAT tool in <code>tools/extract</code>; dump a real <code>PlFc.dat</code> header, sections, roots, and names.</li>
+  <li>Decode the JOBJ tree of <code>PlFc.dat</code>; print the bone hierarchy + base transforms; hit <b>67 bones</b>.</li>
+  <li>Decode one DOBJ/POBJ/MOBJ primitive group into vertices/indices; hit <b>26 prim groups</b>.</li>
+  <li>Action table + figatree: resolve Falco's <code>Wait1</code> / a blaster action; hit <b>&gt;300 actions</b>.</li>
+  <li>First cached Falco asset + <code>/api/pose</code> render of <code>Wait1</code> in 2D.</li>
+</ol>
+
+<div class="footer">melee_c &middot; extraction written in C from scratch &middot; Zig = behavioral reference only &middot; public reverse-engineering sources linked inline</div>
+
+</div>
+</body>
+</html>

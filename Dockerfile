@@ -16,7 +16,8 @@ RUN mkdir -p /data/replays
 COPY --from=build /src/bin/viewer /usr/local/bin/viewer
 COPY --from=build /src/bin/extract_tool /usr/local/bin/extract_tool
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-ENV PORT=8080 SLP_DIR=/data/replays ASSET_DIR=/data/replays/cache HOST=0.0.0.0
+COPY web/ /web/
+ENV PORT=8080 SLP_DIR=/data/replays ASSET_DIR=/data/replays/cache HOST=0.0.0.0 WEB_DIR=/web
 EXPOSE 8080
 VOLUME ["/data/replays"]
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
