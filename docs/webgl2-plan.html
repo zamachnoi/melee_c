@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>melee_c — WebGL2 Replay Renderer Implementation Plan</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#0f1218; --panel:#171c25; --panel2:#1d2430; --line:#2b3545;
+    --fg:#e4e9f1; --muted:#93a0b4; --blue:#78a9ff; --green:#75d6a1;
+    --amber:#f2c879; --red:#f08b98; --purple:#bd9cff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box }
+  html { scroll-behavior:smooth }
+  body { margin:0;background:var(--bg);color:var(--fg);font:15px/1.62 system-ui,-apple-system,Segoe UI,Roboto,sans-serif }
+  .layout { max-width:1220px;margin:auto;padding:28px 24px 80px;display:grid;grid-template-columns:230px minmax(0,1fr);gap:34px }
+  nav { position:sticky;top:20px;align-self:start;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px }
+  nav strong { display:block;font:12px var(--mono);color:var(--muted);margin:2px 8px 8px;text-transform:uppercase;letter-spacing:.08em }
+  nav a { display:block;color:var(--muted);text-decoration:none;padding:5px 8px;border-radius:6px;font-size:13px }
+  nav a:hover { color:var(--fg);background:var(--panel2) }
+  main { min-width:0 }
+  h1 { font-size:30px;line-height:1.2;letter-spacing:-.6px;margin:0 0 6px }
+  h2 { font-size:20px;margin:44px 0 12px;padding-top:18px;border-top:1px solid var(--line) }
+  h2 .n { color:var(--blue);font:15px var(--mono);margin-right:9px }
+  h3 { color:var(--green);font-size:16px;margin:24px 0 7px }
+  h4 { color:var(--amber);font-size:14px;margin:18px 0 5px }
+  p { margin:8px 0 }
+  a { color:var(--blue) }
+  code { font:13px var(--mono);background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#a9e6c3 }
+  pre { margin:12px 0;background:#121720;border:1px solid var(--line);border-radius:9px;padding:15px;overflow:auto;font:12.5px/1.55 var(--mono) }
+  pre code { background:none;border:0;padding:0;color:var(--fg) }
+  ul,ol { padding-left:24px;margin:8px 0 }
+  li { margin:4px 0 }
+  table { border-collapse:collapse;width:100%;font-size:13px;margin:12px 0 }
+  th,td { border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top }
+  th { background:var(--panel2);color:var(--muted);font:600 12px var(--mono) }
+  tr:nth-child(even) td { background:#131821 }
+  .sub { color:var(--muted);font:13px var(--mono);margin-bottom:5px }
+  .hero { background:linear-gradient(135deg,#182131,#161b24);border:1px solid #33425a;border-radius:14px;padding:22px;margin:20px 0 }
+  .hero b { color:var(--green) }
+  .card { background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:16px 18px;margin:14px 0 }
+  .grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px }
+  .note { border-left:3px solid var(--amber);background:#211e18;border-radius:0 8px 8px 0;padding:10px 14px;margin:12px 0 }
+  .ok { border-left-color:var(--green);background:#152019 }
+  .bad { border-left-color:var(--red);background:#24191d }
+  .decision { border-left-color:var(--purple);background:#1d1928 }
+  .tag { display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 9px;margin:0 5px 4px 0;font:11px var(--mono);color:var(--muted);background:var(--panel2) }
+  .tag.must { color:var(--green);border-color:#315644 }
+  .tag.gate { color:var(--amber);border-color:#5c4a2e }
+  .tag.remove { color:var(--red);border-color:#603641 }
+  .phase { border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:18px 0 }
+  .phase > header { padding:13px 17px;background:var(--panel2);display:flex;align-items:center;justify-content:space-between;gap:10px }
+  .phase > header b { color:var(--blue) }
+  .phase .body { padding:14px 18px;background:var(--panel) }
+  .gatebox { background:#172019;border:1px solid #31513e;border-radius:8px;padding:10px 13px;margin:12px 0 }
+  .gatebox strong { color:var(--green) }
+  .metric { color:var(--amber);font-family:var(--mono) }
+  .checklist { list-style:none;padding-left:0 }
+  .checklist li::before { content:"□";color:var(--blue);font-family:var(--mono);margin-right:9px }
+  .footer { color:var(--muted);font:12px var(--mono);text-align:center;margin-top:60px }
+  @media(max-width:860px){.layout{display:block;padding:20px 16px 60px}nav{position:static;margin-bottom:24px;columns:2}.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <strong>Implementation plan</strong>
+  <a href="#goal">Goal</a>
+  <a href="#baseline">Baseline</a>
+  <a href="#decisions">Decisions</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#modules">Modules</a>
+  <a href="#timeline">Replay timeline</a>
+  <a href="#live">WebSocket live mode</a>
+  <a href="#assets">GPU assets</a>
+  <a href="#renderer">WebGL2 renderer</a>
+  <a href="#animation">Animation &amp; skinning</a>
+  <a href="#camera">Camera &amp; clock</a>
+  <a href="#phases">Phases</a>
+  <a href="#testing">Testing</a>
+  <a href="#budgets">Performance budgets</a>
+  <a href="#risks">Risks</a>
+  <a href="#cutover">Cutover</a>
+</nav>
+
+<main>
+<h1>WebGL2 replay renderer</h1>
+<div class="sub">A staged replacement for server-rendered replay frames</div>
+<div class="sub">Decision: WebGL2 production renderer · C remains parser, extractor, and visual reference</div>
+<div class="sub">Plan date: 2026-08-16 · Asset schema baseline: 4</div>
+
+<section id="goal" class="hero">
+  <b>Outcome.</b> A replay downloads state and reusable assets once, then plays and scrubs locally at a deterministic 60 Hz. WebGL2 renders the stage, animated fighters, items, and effects. Camera movement is instant and never reaches the server. Completed replays use a compact HTTP snapshot; live games use batched WebSocket state updates. The existing C software renderer remains available only as a reference until visual parity is proven.
+</section>
+
+<div class="grid">
+  <div class="card">
+    <h3 style="margin-top:0">Success means</h3>
+    <ul>
+      <li>No <code>/api/frame</code> or <code>/api/frames</code> during normal playback.</li>
+      <li>Exact 60-frame simulation progression.</li>
+      <li>Free pan/zoom, original camera, fit, and player-follow modes.</li>
+      <li>Completed replay payload measured in MB, not hundreds of MB.</li>
+      <li>Reusable assets cached across matches.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Not in the first slice</h3>
+    <ul>
+      <li>WebGPU backend.</li>
+      <li>All 26 characters and every stage.</li>
+      <li>Perfect TEV/material emulation.</li>
+      <li>Particles and every item model.</li>
+      <li>Deleting the C renderer before parity.</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="baseline"><span class="n">01</span>Measured baseline and reason for the rewrite</h2>
+<table>
+  <tr><th>Finding</th><th>Measured result</th><th>Consequence</th></tr>
+  <tr><td>Server frame construction</td><td><span class="metric">34.42 ms average</span> across 240 sampled frames</td><td>One worker cannot produce 60 FPS.</td></tr>
+  <tr><td>Fighter software raster</td><td><span class="metric">16.75 ms average</span>, 23.53 ms max</td><td>Consumes the full frame budget before stage/compression.</td></tr>
+  <tr><td>Deflate</td><td><span class="metric">13.19 ms average</span>, 23.17 ms max</td><td>Repeated compression is expensive and scales per viewer.</td></tr>
+  <tr><td>Compressed frame size</td><td>About <span class="metric">103 KB/frame</span> average</td><td>Approximately 50 Mbps at 60 FPS.</td></tr>
+  <tr><td>Parallel workaround</td><td>Four workers reach about 95 aggregate FPS</td><td>Works, but burns server CPU for every connected viewer.</td></tr>
+</table>
+<div class="note bad"><b>Root constraint:</b> playback must no longer depend on generating, compressing, transferring, decoding, and caching a full raster image for every replay frame.</div>
+
+<h2 id="decisions"><span class="n">02</span>Decisions that should not drift mid-implementation</h2>
+<table>
+  <tr><th>#</th><th>Decision</th><th>Reason</th></tr>
+  <tr><td>D1</td><td><b>WebGL2 is the first production GPU backend.</b></td><td>Broad support, mature tooling, and ample performance for this scene size.</td></tr>
+  <tr><td>D2</td><td><b>Completed replay state is fetched once over HTTP.</b></td><td>A finite replay is a cacheable object; it should not require a live socket.</td></tr>
+  <tr><td>D3</td><td><b>WebSocket is reserved for live/in-progress games.</b></td><td>It carries newly committed frames, replacements from rollback, and game-end state.</td></tr>
+  <tr><td>D4</td><td><b>C remains authoritative during migration.</b></td><td>The browser implementation is verified against known C state and reference images.</td></tr>
+  <tr><td>D5</td><td><b>CPU evaluates bones first; vertex shader skins.</b></td><td>Simple to validate. GPU compute is unnecessary for a few fighters.</td></tr>
+  <tr><td>D6</td><td><b>Existing schema-4 assets are parsed directly first.</b></td><td>They are versioned, pointer-free, big-endian, and already contain GPU-ready source data.</td></tr>
+  <tr><td>D7</td><td><b>Integer replay frame is the source of truth.</b></td><td>Avoids floating-point drift and ties HUD, animation, seeking, and rendering to one index.</td></tr>
+  <tr><td>D8</td><td><b>The old frame API is removed only after parity gates pass.</b></td><td>Keeps a working viewer and a visual oracle throughout the rewrite.</td></tr>
+</table>
+
+<h2 id="architecture"><span class="n">03</span>Target architecture</h2>
+<pre><code>                              reusable, immutable
+                      ┌────── model / anim / stage assets ──────┐
+                      │                    HTTP + browser cache   │
+                      │                                           ▼
+.slp ── C parser ─────┼── completed timeline.bin ── HTTP ──► browser scene store
+                      │                                           ▲
+live Slippi events ───┴── committed/replaced batches ─ WebSocket ┘
+                                                                  │
+                                                deterministic frame clock
+                                                                  │
+                                       animation evaluation + camera state
+                                                                  │
+                                                                  ▼
+                                       WebGL2 vertex skinning + rasterization
+                                                                  │
+                                                                  ▼
+                                                               canvas</code></pre>
+
+<div class="note decision"><b>Playback/network separation:</b> network arrival may add or replace timeline data, but it never advances the playback clock. Playback consumes local state only.</div>
+
+<h2 id="modules"><span class="n">04</span>Proposed module boundaries</h2>
+<table>
+  <tr><th>Module</th><th>Responsibility</th><th>Must not do</th></tr>
+  <tr><td><code>web/main.js</code></td><td>Application composition, loading state, error boundary</td><td>Shader math or binary parsing</td></tr>
+  <tr><td><code>web/replay/timeline.js</code></td><td>Parse immutable timeline, frame lookup, rollback replacement</td><td>DOM or GL calls</td></tr>
+  <tr><td><code>web/replay/clock.js</code></td><td>Play/pause/seek and integer 60 Hz frame selection</td><td>Network fetches</td></tr>
+  <tr><td><code>web/replay/live.js</code></td><td>WebSocket handshake, batching, sequence checks, reconnect</td><td>Advance playback</td></tr>
+  <tr><td><code>web/assets/model.js</code></td><td>Parse <code>.model</code> into typed arrays</td><td>Create renderer-global state</td></tr>
+  <tr><td><code>web/assets/anims.js</code></td><td>Parse actions/tracks/keys</td><td>Sample current replay state</td></tr>
+  <tr><td><code>web/assets/stage.js</code></td><td>Parse sections, lights, authored camera</td><td>Own camera controls</td></tr>
+  <tr><td><code>web/animation/pose.js</code></td><td>Sample tracks and compute bone matrices</td><td>Transform every mesh vertex on CPU</td></tr>
+  <tr><td><code>web/renderer/webgl2.js</code></td><td>Context, pipelines/state, passes, resize, device loss</td><td>Parse replay protocol</td></tr>
+  <tr><td><code>web/renderer/model.js</code></td><td>VAOs, GPU buffers, materials, textures, draw ranges</td><td>Know about WebSocket</td></tr>
+  <tr><td><code>web/renderer/camera.js</code></td><td>View/projection matrices and camera modes</td><td>Mutate timeline</td></tr>
+  <tr><td><code>web/renderer/shaders/*</code></td><td>GLSL ES 3.00 shader sources</td><td>Contain app behavior</td></tr>
+</table>
+
+<h2 id="timeline"><span class="n">05</span>Completed replay timeline contract</h2>
+<p>Add a versioned binary endpoint, conceptually:</p>
+<pre><code>GET /api/replay?f=upload_test.slp
+Content-Type: application/vnd.melee.timeline
+Content-Encoding: br
+ETag: "replay-hash:timeline-schema"
+
+header
+  magic[4]           "RPL2"
+  schema             u16
+  flags              u16
+  start_frame        i32
+  end_frame          i32
+  stage_id           u16
+  slot_count         u8
+  section offsets    u32...
+
+players[]             identity, character, costume, display metadata
+slot_presence[]       bitset per frame
+player_frames[]       fixed-size records, indexed by slot + frame
+items[]               sparse records grouped by frame
+stage_events[]        sparse FoD / Whispy / Stadium events
+camera[]              optional original-camera samples</code></pre>
+
+<h3>Per-player frame — first schema</h3>
+<table>
+  <tr><th>Field</th><th>Type</th><th>Use</th></tr>
+  <tr><td>animation index</td><td><code>u16</code></td><td>Select action/clip without name lookup.</td></tr>
+  <tr><td>action state</td><td><code>u16</code></td><td>HUD/debug and fallbacks.</td></tr>
+  <tr><td>animation frame</td><td><code>f32</code></td><td>Track sampling input.</td></tr>
+  <tr><td>x, y</td><td><code>f32 × 2</code></td><td>Authoritative world root.</td></tr>
+  <tr><td>facing</td><td><code>f32</code></td><td>Horizontal model projection/mirror.</td></tr>
+  <tr><td>percent, shield</td><td><code>f32 × 2</code></td><td>HUD and shield effect.</td></tr>
+  <tr><td>stocks, flags</td><td><code>u8 × 2</code></td><td>Visibility and state flags.</td></tr>
+</table>
+
+<div class="note ok"><b>Size target:</b> a normal two-player completed timeline should be comfortably below 2 MB compressed. Measure before optimizing field widths further.</div>
+
+<h3>Protocol rules</h3>
+<ul>
+  <li>Every multibyte field has documented byte order and alignment.</li>
+  <li>Unknown trailing sections are skipped using offsets/lengths.</li>
+  <li>Schema mismatch fails visibly; never reinterpret bytes optimistically.</li>
+  <li>The endpoint is immutable for a completed replay and supports ETag caching.</li>
+  <li>JSON is retained only for small manifests and human-readable errors.</li>
+</ul>
+
+<h2 id="live"><span class="n">06</span>WebSocket live-state protocol</h2>
+<pre><code>WS /api/live?f=current.slp
+
+client → HELLO { supported_schema, resume_sequence }
+server → SNAPSHOT { replay header + recent committed range }
+server → FRAMES   { sequence, first_frame, count, binary records }
+server → REPLACE  { sequence, first_frame, count, binary records }
+server → GAME_END { final_frame, reason }
+either → PING/PONG
+server → ERROR    { code, message }</code></pre>
+
+<h3>Correctness requirements</h3>
+<ul>
+  <li>Sequence numbers are monotonic. A gap triggers snapshot recovery.</li>
+  <li><code>REPLACE</code> overwrites prior state by frame number; latest rollback version wins.</li>
+  <li>Messages batch frames. Never emit one WebSocket message per player per frame.</li>
+  <li>Reconnect resumes by sequence when possible and falls back to a snapshot.</li>
+  <li>The client exposes buffer depth but does not couple render timing to socket timing.</li>
+  <li>Backpressure has a bound; stale intermediate updates may be consolidated into a fresh snapshot.</li>
+</ul>
+
+<h2 id="assets"><span class="n">07</span>GPU asset delivery and parsing</h2>
+<p>The existing cache format is suitable for the first browser implementation. It is explicitly serialized big-endian and already contains bones, vertices, weights, indices, primitive groups, materials, textures, animations, and stage sections.</p>
+
+<h3>Immutable routes</h3>
+<pre><code>/assets/v4/models/fox-0.model
+/assets/v4/anims/fox-0.anims
+/assets/v4/stages/fd.stage
+
+Cache-Control: public, max-age=31536000, immutable
+ETag: content hash</code></pre>
+
+<h3>Browser parsing strategy</h3>
+<ul>
+  <li>Use <code>ArrayBuffer</code> + <code>DataView</code> for big-endian headers and records.</li>
+  <li>Copy final arrays once into native typed arrays suitable for <code>gl.bufferData</code>.</li>
+  <li>Validate counts before allocation and reject truncated/oversized inputs.</li>
+  <li>Upload raw RGBA textures directly first; atlas/compressed texture work is deferred.</li>
+  <li>Key the in-memory asset cache by schema, character, and costume.</li>
+</ul>
+
+<div class="note"><b>Do not optimize the wire format early.</b> Prove one exact Fox/Falco/FD vertical slice with schema 4. Introduce atlases or KTX2 only after measuring actual asset transfer and GPU memory.</div>
+
+<h2 id="renderer"><span class="n">08</span>WebGL2 render architecture</h2>
+
+<h3>GPU resources per model</h3>
+<table>
+  <tr><th>Resource</th><th>Contents</th><th>Lifetime</th></tr>
+  <tr><td>VAO</td><td>Complete vertex attribute layout</td><td>Asset lifetime</td></tr>
+  <tr><td>Vertex buffers</td><td>position, normal, UV, color, weights, bone indices</td><td>Asset lifetime</td></tr>
+  <tr><td>Index buffer</td><td><code>UNSIGNED_SHORT</code> triangle indices</td><td>Asset lifetime</td></tr>
+  <tr><td>Textures</td><td>RGBA material images</td><td>Asset lifetime</td></tr>
+  <tr><td>Material table</td><td>texture, diffuse, alpha, flags, draw range</td><td>Asset lifetime</td></tr>
+  <tr><td>Bone texture</td><td>Current matrices as <code>RGBA32F</code> texels</td><td>Updated per pose</td></tr>
+</table>
+
+<h3>Pass order</h3>
+<ol>
+  <li>Backdrop clear/gradient.</li>
+  <li>Opaque stage sections with depth writes.</li>
+  <li>Opaque fighter primitive groups with depth writes.</li>
+  <li>Items and simple effects.</li>
+  <li>Transparent primitive groups, sorted at group granularity.</li>
+  <li>Shields and debug overlays.</li>
+  <li>HTML HUD outside WebGL.</li>
+</ol>
+
+<h3>Required GL state discipline</h3>
+<ul>
+  <li>One renderer-owned state cache; application code never calls raw GL.</li>
+  <li>Explicit state setup per pass: program, VAO, depth test/write, blend mode, cull mode.</li>
+  <li>Development builds check <code>gl.getError()</code> at pass boundaries.</li>
+  <li>Handle <code>webglcontextlost</code> and rebuild all resources after restoration.</li>
+  <li>Use device-pixel-ratio-aware canvas sizing with a configurable upper bound.</li>
+</ul>
+
+<h3>Projection mapping to preserve</h3>
+<p>The first shader must match <code>render_pose_profile</code>, not invent a new view:</p>
+<ul>
+  <li>Model Z contributes horizontal screen position.</li>
+  <li>Model Y contributes vertical screen position.</li>
+  <li>Model X supplies painter/depth ordering.</li>
+  <li>Negative replay facing mirrors the profile horizontally.</li>
+  <li>Replay x/y is the authoritative fighter root; animation root locomotion is not double-applied.</li>
+</ul>
+
+<h2 id="animation"><span class="n">09</span>Animation evaluation and GPU skinning</h2>
+<h3>CPU pose evaluation — port in this order</h3>
+<ol>
+  <li><code>sample_key</code>: step, linear, and guarded cubic Hermite.</li>
+  <li><code>sample_joint</code>: base SRT decomposition followed by animated channel overrides.</li>
+  <li><code>eval_pose</code>: local matrices followed by parent-to-child world matrices.</li>
+  <li>Rigid versus weighted skin matrix preparation.</li>
+  <li>Upload matrices to the fighter's floating-point bone texture.</li>
+</ol>
+
+<h3>Vertex shader contract</h3>
+<pre><code>#version 300 es
+in vec3 a_position;
+in vec2 a_uv;
+in vec4 a_color;
+in vec4 a_weights;
+in uvec4 a_bones;
+
+uniform sampler2D u_boneMatrices;
+uniform mat4 u_viewProjection;
+uniform vec2 u_replayRoot;
+uniform float u_facing;
+
+// Fetch 3x4 affine matrices, blend by weights, preserve rigid-vertex rule,
+// convert model profile axes to replay world axes, then apply camera.</code></pre>
+
+<h3>Validation invariants</h3>
+<ul>
+  <li>Animation frame quirk (<code>frame &lt;= 0 ? 1 : frame + 1</code>) matches C.</li>
+  <li>Loop wrapping matches action <code>end_frame</code>.</li>
+  <li>Root animation translation is suppressed where replay x/y is authoritative.</li>
+  <li>Facing changes only the intended profile axis.</li>
+  <li>Missing animation uses an explicit, tested fallback.</li>
+</ul>
+
+<h2 id="camera"><span class="n">10</span>Camera, controls, and exact frame clock</h2>
+<h3>Camera state</h3>
+<pre><code>{
+  mode: "free" | "melee" | "fit" | "follow" | "stage",
+  centerX: number,
+  centerY: number,
+  zoom: number,
+  targetPort: number | null,
+  smoothing: number
+}</code></pre>
+
+<h3>Controls</h3>
+<ul>
+  <li>Pointer drag: pan.</li>
+  <li>Wheel/pinch: zoom around cursor.</li>
+  <li>Double click: reset to selected mode.</li>
+  <li>Number keys: follow player.</li>
+  <li>Mode button: free, original Melee, fit players, stage, follow.</li>
+  <li>Camera control remains active while paused and while scrubbing.</li>
+</ul>
+
+<h3>Clock rules</h3>
+<pre><code>elapsed = now - playbackStartedAt
+frame = anchorFrame + floor(elapsed * 60 / 1000)
+frame = clamp(frame, startFrame, endFrame)</code></pre>
+<ul>
+  <li>Never repeatedly add <code>1000/60</code>; derive from the anchor to avoid drift.</li>
+  <li>Seeking sets an integer frame and resets the time anchor.</li>
+  <li>On 120/144 Hz displays, a state may render more than once; simulation remains 60 Hz.</li>
+  <li>If one presentation is missed, jump to the correct current replay frame rather than slowing simulation.</li>
+</ul>
+
+<h2 id="phases"><span class="n">11</span>Implementation phases and hard exit gates</h2>
+
+<div class="phase">
+  <header><b>Phase 0 — Golden fixtures and contracts</b><span class="tag gate">No rendering yet</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Select representative frames: idle, run, attack, shield, airborne, facing flip, rollback, Nana.</li>
+      <li>Record C frame state and reference images for Fox/Falco on FD.</li>
+      <li>Write timeline schema and WebSocket message specification.</li>
+      <li>Define renderer interface and camera coordinate conventions.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> fixtures and byte-level contracts are reviewed before browser implementation starts.</div>
+  </div>
+</div>
+
+<div class="phase">
+  <header><b>Phase 1 — State and asset delivery</b><span class="tag must">No pixel streaming</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Add completed timeline serializer and endpoint.</li>
+      <li>Add immutable, allowlisted asset routes.</li>
+      <li>Implement browser parsers for model, animations, and stage.</li>
+      <li>Compare browser-decoded records with C structs across fixtures.</li>
+      <li>Add payload size and parse-time measurements.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> browser loads all state and assets for a replay; sampled values exactly match C; timeline is under the agreed size target.</div>
+  </div>
+</div>
+
+<div class="phase">
+  <header><b>Phase 2 — Static WebGL2 vertical slice</b><span class="tag gate">Fox/Falco/FD</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Create context, resize policy, error boundary, and resource lifecycle.</li>
+      <li>Upload one fighter model and draw bind pose with textures.</li>
+      <li>Draw accepted FD sections and backdrop.</li>
+      <li>Implement free pan/zoom camera.</li>
+      <li>Match C projection, facing, materials, alpha, and depth.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> static reference poses and stage pass image-diff tolerance; camera movement makes zero network requests.</div>
+  </div>
+</div>
+
+<div class="phase">
+  <header><b>Phase 3 — Animation and deterministic playback</b><span class="tag must">60 Hz</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Port key sampling, SRT decomposition, and bone hierarchy evaluation.</li>
+      <li>Implement floating-point bone texture and vertex-shader skinning.</li>
+      <li>Apply replay position, facing, animation index, and animation frame.</li>
+      <li>Add integer-frame clock, play/pause, stepping, and scrub.</li>
+      <li>Add original, fit, and follow camera modes.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> 600 consecutive frames play at 60 Hz; pose matrices match C fixtures; no frame-image requests occur.</div>
+  </div>
+</div>
+
+<div class="phase">
+  <header><b>Phase 4 — Complete replay scene</b><span class="tag gate">Parity</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Multiple ports, same-character matches, followers/Nana.</li>
+      <li>Items, lasers, shields, stocks, HUD, and debug overlays.</li>
+      <li>Dynamic stage events already present in parser data.</li>
+      <li>Missing assets and animations degrade visibly and safely.</li>
+      <li>Run full-match soak tests and context restore tests.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> sample replays complete without errors; camera modes work throughout; visual discrepancies are enumerated rather than hidden.</div>
+  </div>
+</div>
+
+<div class="phase">
+  <header><b>Phase 5 — Live WebSocket mode</b><span class="tag gate">Rollback-safe</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Implement handshake, snapshot, batched frames, replacement, and game-end messages.</li>
+      <li>Add sequence-gap recovery and reconnect.</li>
+      <li>Test artificial latency, reordering, disconnect, duplicate messages, and rollback.</li>
+      <li>Expose live buffer depth and connection state separately from playback.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> rollback replacements converge to the same final state as parsing the completed SLP.</div>
+  </div>
+</div>
+
+<div class="phase">
+  <header><b>Phase 6 — Default and removal</b><span class="tag remove">Delete only after proof</span></header>
+  <div class="body">
+    <ul class="checklist">
+      <li>Ship GPU renderer behind a query flag, then opt-in toggle, then default.</li>
+      <li>Collect errors, frame timing, asset failures, and context-loss metrics.</li>
+      <li>Retain C reference endpoints for one release window.</li>
+      <li>Remove raster-frame playback code and prefetch cache after acceptance.</li>
+    </ul>
+    <div class="gatebox"><strong>Exit gate:</strong> GPU mode is stable as default and the raster transport has no remaining product dependency.</div>
+  </div>
+</div>
+
+<h2 id="testing"><span class="n">12</span>Test plan</h2>
+<table>
+  <tr><th>Layer</th><th>Tests</th><th>Failure signal</th></tr>
+  <tr><td>Timeline</td><td>Golden binary, truncation, schema mismatch, rollback replacement, sparse slots/items</td><td>Exact field mismatch</td></tr>
+  <tr><td>Asset parser</td><td>Counts, offsets, endian values, bounds, malformed input</td><td>Reject safely; never oversized allocation</td></tr>
+  <tr><td>Animation</td><td>Step/linear/Hermite, loop, start frame, root suppression, hierarchy</td><td>Matrix epsilon exceeded</td></tr>
+  <tr><td>Renderer</td><td>Bind pose, sampled poses, facing, texture/material, transparency, stage</td><td>Image difference beyond threshold</td></tr>
+  <tr><td>Clock</td><td>60/120/144 Hz simulation, pause/resume, seek, long-duration drift</td><td>Wrong integer replay frame</td></tr>
+  <tr><td>Camera</td><td>Pan, zoom-at-cursor, follow, fit, mode switch, resize</td><td>Incorrect world/screen round trip</td></tr>
+  <tr><td>Live</td><td>Duplicate, gap, rollback, reconnect, delayed snapshot, game end</td><td>Final timeline differs from completed parse</td></tr>
+  <tr><td>Soak</td><td>Full replay, repeated replay switch, context loss/restore</td><td>Leak, crash, increasing frame time</td></tr>
+</table>
+
+<h3>Visual differential workflow</h3>
+<ol>
+  <li>Render a fixture with the C reference renderer at a fixed camera.</li>
+  <li>Render the same frame with WebGL2 at identical dimensions and camera.</li>
+  <li>Capture the canvas.</li>
+  <li>Compare per-pixel and structural similarity.</li>
+  <li>Classify intentional differences; never simply widen tolerance globally.</li>
+</ol>
+
+<h2 id="budgets"><span class="n">13</span>Performance and bandwidth budgets</h2>
+<table>
+  <tr><th>Metric</th><th>Target</th><th>Hard gate</th></tr>
+  <tr><td>GPU render CPU submission</td><td>&lt; 2 ms/frame</td><td>&lt; 4 ms p95</td></tr>
+  <tr><td>Animation evaluation</td><td>&lt; 1 ms/frame</td><td>&lt; 2 ms p95</td></tr>
+  <tr><td>Total app frame work</td><td>&lt; 5 ms/frame</td><td>&lt; 10 ms p95</td></tr>
+  <tr><td>Completed timeline</td><td>&lt; 2 MB typical</td><td>&lt; 5 MB typical match</td></tr>
+  <tr><td>Reusable initial assets</td><td>&lt; 25 MB compressed</td><td>Measured and cached; no repeat per replay</td></tr>
+  <tr><td>Playback network</td><td>0 bytes after load</td><td>No frame-image requests</td></tr>
+  <tr><td>Live state bandwidth</td><td>&lt; 100 KB/s</td><td>&lt; 250 KB/s</td></tr>
+  <tr><td>Long-run drift</td><td>0 replay frames</td><td>0 after 30 minutes</td></tr>
+</table>
+
+<h2 id="risks"><span class="n">14</span>Risk register and mitigations</h2>
+<table>
+  <tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr>
+  <tr><td>GPU skinning differs from C rigid/weighted semantics</td><td>Exploded or offset meshes</td><td>Golden matrix tests and one model-group-at-a-time rendering.</td></tr>
+  <tr><td>Transparency differs from painter sorting</td><td>Visual artifacts</td><td>Opaque depth pass plus sorted transparent primitive groups; document irreducible cases.</td></tr>
+  <tr><td>Browser asset parser trusts corrupt counts</td><td>Memory/availability problem</td><td>Strict maximums, checked offsets, schema/magic validation.</td></tr>
+  <tr><td>Large raw RGBA texture assets</td><td>Slow first load and GPU memory</td><td>Measure first; atlas/compress only after vertical slice.</td></tr>
+  <tr><td>Main-thread animation causes jank</td><td>Missed presentation</td><td>Profile; move pose evaluation to Worker only if over budget.</td></tr>
+  <tr><td>WebSocket becomes playback clock</td><td>Network jitter causes stutter</td><td>Architectural rule: socket mutates timeline only.</td></tr>
+  <tr><td>Rewrite stays permanently half-migrated</td><td>Two systems to maintain</td><td>Hard phase gates and explicit cutover/removal phase.</td></tr>
+  <tr><td>Unsupported WebGL2/device loss</td><td>Blank viewer</td><td>Capability screen, actionable message, context restore, C fallback during migration.</td></tr>
+</table>
+
+<h2 id="cutover"><span class="n">15</span>Rollout and cutover</h2>
+<ol>
+  <li><code>?renderer=webgl2</code> development path; existing renderer remains default.</li>
+  <li>Internal visual/performance fixture suite must pass.</li>
+  <li>Add user-visible renderer toggle and collect client errors.</li>
+  <li>Make WebGL2 default while retaining <code>?renderer=software</code>.</li>
+  <li>After a stable window, remove frame prefetch, frame decoding worker, and raster playback endpoints.</li>
+  <li>Keep a command-line/reference C renderer for golden-image generation.</li>
+</ol>
+
+<div class="note ok"><b>First vertical slice:</b> load one completed Fox vs. Falco replay on Final Destination, download its timeline and three reusable assets, draw textured animated fighters and the stage in WebGL2, play 600 consecutive frames at 60 Hz, and allow free camera pan/zoom—with zero frame-image requests. Do not broaden scope until this passes.</div>
+
+<h2><span class="n">16</span>Definition of done</h2>
+<ul class="checklist">
+  <li>Completed replay playback is fully local after initial state/assets load.</li>
+  <li>Live mode is batched, sequence-safe, reconnectable, and rollback-correct.</li>
+  <li>WebGL2 reproduces accepted C reference poses and stage output.</li>
+  <li>Playback clock advances exactly 60 replay frames per second without drift.</li>
+  <li>Camera is locally controllable in every playback state.</li>
+  <li>Measured performance and bandwidth meet the budgets above.</li>
+  <li>Raster-frame streaming is no longer used by the product path.</li>
+  <li>The old playback implementation is removed, not merely disabled forever.</li>
+</ul>
+
+<div class="footer">melee_c · WebGL2 migration plan · state over the network, pixels on the GPU</div>
+</main>
+</div>
+</body>
+</html>
