@@ -140,6 +140,10 @@
   <tr><td>D6</td><td><b>Existing schema-4 assets are parsed directly first.</b></td><td>They are versioned, pointer-free, big-endian, and already contain GPU-ready source data.</td></tr>
   <tr><td>D7</td><td><b>Integer replay frame is the source of truth.</b></td><td>Avoids floating-point drift and ties HUD, animation, seeking, and rendering to one index.</td></tr>
   <tr><td>D8</td><td><b>The old frame API is removed only after parity gates pass.</b></td><td>Keeps a working viewer and a visual oracle throughout the rewrite.</td></tr>
+  <tr><td>D9</td><td><b>Replay routes are stateless and replay-scoped.</b></td><td>Concurrent viewers must never race through the server's current global <code>g_active</code> selection.</td></tr>
+  <tr><td>D10</td><td><b>Timeline, live protocol, and asset schemas evolve independently.</b></td><td>A state-layout change must not invalidate extracted models or silently reinterpret socket messages.</td></tr>
+  <tr><td>D11</td><td><b>Original-camera samples are required timeline data.</b></td><td>Three float arrays are cheap and avoid making camera fidelity depend on server rendering.</td></tr>
+  <tr><td>D12</td><td><b>Live transport cannot delay completed-replay cutover.</b></td><td>WebSocket support is a separate milestone after local GPU playback is proven.</td></tr>
 </table>
 
 <h2 id="architecture"><span class="n">03</span>Target architecture</h2>
@@ -147,7 +151,7 @@
                       ┌────── model / anim / stage assets ──────┐
                       │                    HTTP + browser cache   │
                       │                                           ▼
-.slp ── C parser ─────┼── completed timeline.bin ── HTTP ──► browser scene store
+.slp ── C parser ─────┼── replay-scoped timeline.bin ─ HTTP ► browser scene store
                       │                                           ▲
 live Slippi events ───┴── committed/replaced batches ─ WebSocket ┘
                                                                   │
@@ -162,6 +166,15 @@ live Slippi events ───┴── committed/replaced batches ─ WebSocket �
                                                                canvas</code></pre>
 
 <div class="note decision"><b>Playback/network separation:</b> network arrival may add or replace timeline data, but it never advances the playback clock. Playback consumes local state only.</div>
+
+<h3>Stateless replay identity</h3>
+<pre><code>POST /api/replays                         upload, returns immutable replay id
+GET  /api/replays/{id}/manifest          identity, players, stage, schemas
+GET  /api/replays/{id}/timeline          completed binary state snapshot
+WS   /api/replays/{id}/live              live state only
+
+Never: GET /api/set?f=... followed by requests against shared g_active</code></pre>
+<p>The server may internally cache parsed replays by id, but request correctness cannot depend on whichever replay another connection selected most recently.</p>
 
 <h2 id="modules"><span class="n">04</span>Proposed module boundaries</h2>
 <table>
@@ -180,16 +193,25 @@ live Slippi events ───┴── committed/replaced batches ─ WebSocket �
   <tr><td><code>web/renderer/shaders/*</code></td><td>GLSL ES 3.00 shader sources</td><td>Contain app behavior</td></tr>
 </table>
 
+<h3>Frontend delivery decision</h3>
+<ul>
+  <li>Use native browser ES modules rather than a production bundle initially.</li>
+  <li>Use JSDoc types plus <code>tsc --checkJs</code> for protocol, math, and renderer checking without a runtime build dependency.</li>
+  <li>Use Node's test runner for pure timeline, asset, clock, and animation modules.</li>
+  <li>Teach the C server to serve allowlisted static files with correct JavaScript, CSS, and binary MIME types.</li>
+  <li>Keep shaders as JavaScript string modules initially so shader loading cannot race or require another fetch.</li>
+</ul>
+
 <h2 id="timeline"><span class="n">05</span>Completed replay timeline contract</h2>
 <p>Add a versioned binary endpoint, conceptually:</p>
-<pre><code>GET /api/replay?f=upload_test.slp
+<pre><code>GET /api/replays/{id}/timeline
 Content-Type: application/vnd.melee.timeline
-Content-Encoding: br
 ETag: "replay-hash:timeline-schema"
+Vary: Accept-Encoding
 
 header
   magic[4]           "RPL2"
-  schema             u16
+  timeline_schema    u16
   flags              u16
   start_frame        i32
   end_frame          i32
@@ -199,10 +221,19 @@ header
 
 players[]             identity, character, costume, display metadata
 slot_presence[]       bitset per frame
-player_frames[]       fixed-size records, indexed by slot + frame
+slot[N].x[]           structure-of-arrays, directly typed and indexed
+slot[N].y[]
+slot[N].animation_index[]
+slot[N].animation_frame[]
+slot[N].facing[]
+slot[N].percent[]
+slot[N].shield[]
+slot[N].stocks[]
 items[]               sparse records grouped by frame
 stage_events[]        sparse FoD / Whispy / Stadium events
-camera[]              optional original-camera samples</code></pre>
+camera.x[]            required original-camera samples
+camera.y[]
+camera.zoom[]</code></pre>
 
 <h3>Per-player frame — first schema</h3>
 <table>
@@ -218,16 +249,24 @@ camera[]              optional original-camera samples</code></pre>
 
 <div class="note ok"><b>Size target:</b> a normal two-player completed timeline should be comfortably below 2 MB compressed. Measure before optimizing field widths further.</div>
 
+<h3>Why structure-of-arrays</h3>
+<p>Fields are stored as contiguous arrays rather than repeated frame objects. This improves HTTP compression, permits direct typed-array views, avoids per-frame allocations, and makes random frame lookup a constant set of indexed reads.</p>
+
 <h3>Protocol rules</h3>
 <ul>
   <li>Every multibyte field has documented byte order and alignment.</li>
+  <li><code>asset_schema</code>, <code>timeline_schema</code>, and <code>live_protocol</code> are separate version numbers.</li>
   <li>Unknown trailing sections are skipped using offsets/lengths.</li>
   <li>Schema mismatch fails visibly; never reinterpret bytes optimistically.</li>
   <li>The endpoint is immutable for a completed replay and supports ETag caching.</li>
+  <li>Compression is negotiated by HTTP via <code>Accept-Encoding</code>; Brotli is not part of the binary contract.</li>
   <li>JSON is retained only for small manifests and human-readable errors.</li>
 </ul>
 
+<div class="note"><b>Index proof before freeze:</b> verify across golden fixtures that Slippi's <code>animation_index</code> maps consistently to <code>asset_anims_t.actions[]</code>. Until proven, preserve both the raw index and resolved identity in diagnostic output.</div>
+
 <h2 id="live"><span class="n">06</span>WebSocket live-state protocol</h2>
+<div class="note decision"><b>Independent milestone:</b> implement this only after completed-replay WebGL2 playback is viable. Live transport cannot block the GPU renderer becoming the default for completed games.</div>
 <pre><code>WS /api/live?f=current.slp
 
 client → HELLO { supported_schema, resume_sequence }
@@ -247,6 +286,7 @@ server → ERROR    { code, message }</code></pre>
   <li>The client exposes buffer depth but does not couple render timing to socket timing.</li>
   <li>Backpressure has a bound; stale intermediate updates may be consolidated into a fresh snapshot.</li>
 </ul>
+<p>Do not casually hand-roll a production WebSocket stack inside the minimal HTTP server. At implementation time, select a small reviewed C WebSocket library or isolate live transport in a dedicated gateway; keep the binary state contract independent of that choice.</p>
 
 <h2 id="assets"><span class="n">07</span>GPU asset delivery and parsing</h2>
 <p>The existing cache format is suitable for the first browser implementation. It is explicitly serialized big-endian and already contains bones, vertices, weights, indices, primitive groups, materials, textures, animations, and stage sections.</p>
@@ -302,6 +342,17 @@ ETag: content hash</code></pre>
   <li>Handle <code>webglcontextlost</code> and rebuild all resources after restoration.</li>
   <li>Use device-pixel-ratio-aware canvas sizing with a configurable upper bound.</li>
 </ul>
+
+<h3>Capability gate before asset loading</h3>
+<ul>
+  <li>Require a WebGL2 context and sufficient vertex texture image units.</li>
+  <li>Record maximum texture size, combined texture units, uniform limits, and shader precision.</li>
+  <li>Compile/link the skeletal shader and validate a floating-point bone texture before downloading large assets.</li>
+  <li>Show an actionable compatibility screen on failure; never leave an empty black canvas.</li>
+</ul>
+
+<h3>Transparency parity policy</h3>
+<p>The C reference renderer sorts individual triangles. The initial GPU renderer sorts transparent primitive groups, not every triangle. This difference is accepted for the first vertical slice, recorded in image-diff results, and promoted to per-triangle sorting only where the artifact is material.</p>
 
 <h3>Projection mapping to preserve</h3>
 <p>The first shader must match <code>render_pose_profile</code>, not invent a new view:</p>
@@ -380,6 +431,8 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <li>If one presentation is missed, jump to the correct current replay frame rather than slowing simulation.</li>
 </ul>
 
+<div class="note"><b>Meaning of exact 60:</b> simulation is guaranteed to advance exactly 60 replay frames per second with zero long-run drift. Presentation is measured separately because the browser, compositor, display refresh, and operating system can still drop a visual presentation.</div>
+
 <h2 id="phases"><span class="n">11</span>Implementation phases and hard exit gates</h2>
 
 <div class="phase">
@@ -389,6 +442,10 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
       <li>Select representative frames: idle, run, attack, shield, airborne, facing flip, rollback, Nana.</li>
       <li>Record C frame state and reference images for Fox/Falco on FD.</li>
       <li>Write timeline schema and WebSocket message specification.</li>
+      <li>Define independent asset, timeline, and live protocol versions.</li>
+      <li>Inventory schema-4 asset transfer size and decoded CPU/GPU memory.</li>
+      <li>Specify stateless replay ids and remove new-feature dependence on <code>g_active</code>.</li>
+      <li>Choose native ES module serving, JSDoc type checking, and test commands.</li>
       <li>Define renderer interface and camera coordinate conventions.</li>
     </ul>
     <div class="gatebox"><strong>Exit gate:</strong> fixtures and byte-level contracts are reviewed before browser implementation starts.</div>
@@ -400,12 +457,13 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <div class="body">
     <ul class="checklist">
       <li>Add completed timeline serializer and endpoint.</li>
+      <li>Use replay-scoped stateless routes and a structure-of-arrays payload.</li>
       <li>Add immutable, allowlisted asset routes.</li>
       <li>Implement browser parsers for model, animations, and stage.</li>
       <li>Compare browser-decoded records with C structs across fixtures.</li>
       <li>Add payload size and parse-time measurements.</li>
     </ul>
-    <div class="gatebox"><strong>Exit gate:</strong> browser loads all state and assets for a replay; sampled values exactly match C; timeline is under the agreed size target.</div>
+    <div class="gatebox"><strong>Exit gate:</strong> two clients can load different replay ids concurrently without interference; browser state matches C; timeline is under the agreed size target.</div>
   </div>
 </div>
 
@@ -414,6 +472,7 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <div class="body">
     <ul class="checklist">
       <li>Create context, resize policy, error boundary, and resource lifecycle.</li>
+      <li>Run the capability gate before large downloads.</li>
       <li>Upload one fighter model and draw bind pose with textures.</li>
       <li>Draw accepted FD sections and backdrop.</li>
       <li>Implement free pan/zoom camera.</li>
@@ -433,7 +492,7 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
       <li>Add integer-frame clock, play/pause, stepping, and scrub.</li>
       <li>Add original, fit, and follow camera modes.</li>
     </ul>
-    <div class="gatebox"><strong>Exit gate:</strong> 600 consecutive frames play at 60 Hz; pose matrices match C fixtures; no frame-image requests occur.</div>
+    <div class="gatebox"><strong>Exit gate:</strong> 600 consecutive frames play at 60 Hz, then a 10-minute soak shows zero simulation drift, zero dropped presentations on the reference machine, no steady-state allocation growth, and no frame-image requests.</div>
   </div>
 </div>
 
@@ -488,6 +547,8 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <tr><td>Camera</td><td>Pan, zoom-at-cursor, follow, fit, mode switch, resize</td><td>Incorrect world/screen round trip</td></tr>
   <tr><td>Live</td><td>Duplicate, gap, rollback, reconnect, delayed snapshot, game end</td><td>Final timeline differs from completed parse</td></tr>
   <tr><td>Soak</td><td>Full replay, repeated replay switch, context loss/restore</td><td>Leak, crash, increasing frame time</td></tr>
+  <tr><td>Concurrency</td><td>Two replay ids selected, uploaded, scrubbed, and played concurrently</td><td>Cross-replay state or asset contamination</td></tr>
+  <tr><td>Capabilities</td><td>Missing WebGL2, insufficient limits, shader failure, float texture failure</td><td>Actionable compatibility screen</td></tr>
 </table>
 
 <h3>Visual differential workflow</h3>
@@ -510,6 +571,11 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <tr><td>Playback network</td><td>0 bytes after load</td><td>No frame-image requests</td></tr>
   <tr><td>Live state bandwidth</td><td>&lt; 100 KB/s</td><td>&lt; 250 KB/s</td></tr>
   <tr><td>Long-run drift</td><td>0 replay frames</td><td>0 after 30 minutes</td></tr>
+  <tr><td>Dropped presentation</td><td>0 on reference machine</td><td>0 during 10-minute acceptance soak</td></tr>
+  <tr><td>CPU timeline memory</td><td>&lt; 10 MB typical</td><td>&lt; 20 MB</td></tr>
+  <tr><td>CPU decoded asset memory</td><td>&lt; 100 MB</td><td>&lt; 150 MB</td></tr>
+  <tr><td>GPU buffers and textures</td><td>&lt; 192 MB</td><td>&lt; 256 MB</td></tr>
+  <tr><td>Steady-state allocation</td><td>0 per replay frame</td><td>No upward memory trend</td></tr>
 </table>
 
 <h2 id="risks"><span class="n">14</span>Risk register and mitigations</h2>
@@ -523,6 +589,9 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <tr><td>WebSocket becomes playback clock</td><td>Network jitter causes stutter</td><td>Architectural rule: socket mutates timeline only.</td></tr>
   <tr><td>Rewrite stays permanently half-migrated</td><td>Two systems to maintain</td><td>Hard phase gates and explicit cutover/removal phase.</td></tr>
   <tr><td>Unsupported WebGL2/device loss</td><td>Blank viewer</td><td>Capability screen, actionable message, context restore, C fallback during migration.</td></tr>
+  <tr><td>Global <code>g_active</code> leaks across viewers</td><td>Wrong replay or corrupted timeline</td><td>Replay-scoped immutable ids and a concurrent-client integration test.</td></tr>
+  <tr><td><code>animation_index</code> is not a stable action-table index</td><td>Wrong poses despite valid state</td><td>Golden mapping proof before timeline schema freeze; retain raw diagnostic identity.</td></tr>
+  <tr><td>Hand-written WebSocket stack grows scope/security risk</td><td>Delays core renderer</td><td>Defer live milestone and use a reviewed library or isolated gateway.</td></tr>
 </table>
 
 <h2 id="cutover"><span class="n">15</span>Rollout and cutover</h2>
@@ -535,7 +604,7 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <li>Keep a command-line/reference C renderer for golden-image generation.</li>
 </ol>
 
-<div class="note ok"><b>First vertical slice:</b> load one completed Fox vs. Falco replay on Final Destination, download its timeline and three reusable assets, draw textured animated fighters and the stage in WebGL2, play 600 consecutive frames at 60 Hz, and allow free camera pan/zoom—with zero frame-image requests. Do not broaden scope until this passes.</div>
+<div class="note ok"><b>First vertical slice:</b> statelessly load one completed Fox vs. Falco replay on Final Destination, download its structure-of-arrays timeline and three reusable schema-4 assets, draw textured animated fighters and the stage in WebGL2, play 600 consecutive frames at 60 Hz, allow free camera pan/zoom, then pass a 10-minute no-drift/no-growth soak—with zero frame-image requests. Do not broaden scope until this passes.</div>
 
 <h2><span class="n">16</span>Definition of done</h2>
 <ul class="checklist">
@@ -543,7 +612,9 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
   <li>Live mode is batched, sequence-safe, reconnectable, and rollback-correct.</li>
   <li>WebGL2 reproduces accepted C reference poses and stage output.</li>
   <li>Playback clock advances exactly 60 replay frames per second without drift.</li>
+  <li>Reference-machine acceptance shows zero dropped presentations over the defined soak.</li>
   <li>Camera is locally controllable in every playback state.</li>
+  <li>Concurrent users can operate on different replay ids without shared mutable selection state.</li>
   <li>Measured performance and bandwidth meet the budgets above.</li>
   <li>Raster-frame streaming is no longer used by the product path.</li>
   <li>The old playback implementation is removed, not merely disabled forever.</li>
