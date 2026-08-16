@@ -39,8 +39,8 @@
 #include "parser.h"
 #include "render.h"
 
-#define FB_W 960
-#define FB_H 720
+#define FB_W 640
+#define FB_H 480
 #define FB_BYTES ((size_t)FB_W * FB_H * 4)
 
 #ifndef ASSET_DIR
@@ -1306,7 +1306,7 @@ static const char *html_doc =
     "#help{color:#666;font-size:11px;margin-top:6px}"
     "</style></head><body>"
     "<h1>Melee 2D Replay</h1>"
-    "<div id=wrap><canvas id=cv width=960 height=720></canvas>"
+    "<div id=wrap><canvas id=cv width=640 height=480></canvas>"
     "<div id=hud></div></div>"
     "<div id=bar>"
     "<select id=sel></select>"
@@ -1327,7 +1327,7 @@ static const char *html_doc =
     "const pngCache=new Map(),pending=new Map();"
     "let nextFill=0,inflight=0;"
     "const MAX_BATCH=2,BATCH=30,PREFETCH=120,START_BUFFER=30,STEP=1000/60;"
-    "const W=960,H=720;"
+    "const W=640,H=480;"
     "const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];"
     "async function fetchReplays(){"
     "const r=await fetch('/api/replays');const list=await r.json();"
