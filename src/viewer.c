@@ -10,7 +10,7 @@
  *   GET /api/set?f=<name>     load <name> as the active replay
  *   POST /api/upload?f=<name> upload an .slp file (raw body) and load it
  *   GET /api/info             JSON about the active replay
- *   GET /api/frame?n=<frame>  binary: [4B BE json_len][json][W*H*4 RGBA]
+ *   GET /api/frame?n=<frame>  binary: [4B BE json_len][json][deflated RGBA]
  *
  * Environment:
  *   PORT   HTTP port (default 8080)
@@ -39,8 +39,8 @@
 #include "parser.h"
 #include "render.h"
 
-#define FB_W 720
-#define FB_H 405
+#define FB_W 960
+#define FB_H 720
 #define FB_BYTES ((size_t)FB_W * FB_H * 4)
 
 #ifndef ASSET_DIR
@@ -63,6 +63,11 @@ typedef struct {
     asset_anims_t *anims[SLP_SLOT_COUNT];
     asset_stage_t *stage;
     uint8_t *stage_fb;
+    uint8_t *stage_sprite;
+    int stage_sprite_w, stage_sprite_h;
+    double stage_sprite_ppu, stage_sprite_min_x, stage_sprite_max_y;
+    cam_t *frame_cams;
+    size_t frame_cam_count;
     int32_t start_frame;
     int32_t last_frame;
     char name[256];
@@ -165,6 +170,137 @@ static void compute_camera(slp_replay_t *r, cam_t *cam) {
     cam->cy = (miny + maxy) / 2.0;
 }
 
+/* Reproduce the authored Melee stage camera.  HSD stores the camera position,
+   vertical/horizontal aim angles, and vertical field of view. */
+static void compute_stage_camera(const asset_stage_t *stage, cam_t *cam) {
+    if (!stage || stage->cam_pos[2] <= 0.0f || stage->cam_fov <= 0.0f)
+        return;
+    const double radians = 3.14159265358979323846 / 180.0;
+    double distance = stage->cam_pos[2];
+    double fov = stage->cam_fov * radians;
+    cam->cx = stage->cam_pos[0] + distance * tan(stage->cam_horiz * radians);
+    cam->cy = stage->cam_pos[1] + distance * tan(stage->cam_vert * radians);
+    cam->scale = FB_H / (2.0 * distance * tan(fov * 0.5));
+}
+
+static cam_t gameplay_camera_target(const active_t *a, int32_t fn) {
+    cam_t cam = a->cam;
+    double minx = INFINITY, maxx = -INFINITY;
+    double miny = INFINITY, maxy = -INFINITY;
+    const slp_frame_t *subjects[SLP_MAX_PORTS];
+    unsigned count = 0;
+    for (unsigned port = 0; port < SLP_MAX_PORTS; port++) {
+        if (!a->replay.game_start.has_player[port]) continue;
+        const slp_frame_t *f = slp_frame_at(&a->replay, port, false, fn);
+        if (!f || !f->stocks_remaining || fabs(f->x) > 300 ||
+            f->y < -120 || f->y > 240)
+            continue;
+        subjects[count++] = f;
+    }
+    if (!count) return cam;
+
+    static const double subject_weight[] = {0.0, 1.5, 1.32, 1.16, 1.0};
+    const double track = subject_weight[count] * 1.5;
+    for (unsigned i = 0; i < count; i++) {
+        const slp_frame_t *f = subjects[i];
+        /* Melee tracks a character-specific CmSubject box.  Fox and Falco
+           both use ftData.x3C = {10,22,-9, 16,-9,11.2}.  With two subjects,
+           Camera_8002958C applies 1.32 * FD's 1.5 tracking ratio. */
+        double x = fmax(-170.0, fmin(170.0, f->x));
+        double y = fmax(-60.0, fmin(120.0, f->y + 10.0));
+        double xl, xr;
+        if (f->facing >= 0) {
+            xl = x - 9.0 * track;
+            xr = x + 22.0 * 1.5 * track;
+        } else {
+            xl = x - 22.0 * 1.5 * track;
+            xr = x + 9.0 * track;
+        }
+        xl = fmax(-170.0, xl);
+        xr = fmin(170.0, xr);
+        double yb = fmax(-60.0, y - 9.0 * track);
+        double yt = fmin(120.0, y + 16.0 * track);
+        if (xl < minx) minx = xl;
+        if (xr > maxx) maxx = xr;
+        if (yb < miny) miny = yb;
+        if (yt > maxy) maxy = yt;
+    }
+
+    /* Camera_8002958C adds bottom padding; Camera_80029CF8 then solves the
+       asymmetric frustum around the box.  Constants are from the Melee
+       decomp and FD's grGroundParam. */
+    miny -= 10.0;
+    const double rad = 3.14159265358979323846 / 180.0;
+    const double half_fov = 19.0 * rad; /* gameplay FOV is 38 degrees */
+    const double aspect = 1.2173333;    /* Melee's gameplay projection */
+    double dx = maxx - minx, dy = maxy - miny;
+    double spread = fmax(dx, dy);
+    double bias = spread <= 60.0 ? 0.0 : spread >= 120.0 ? 0.0682
+        : 0.0682 * (spread - 60.0) / 60.0;
+    double base = (miny + maxy) * (0.5 - bias);
+    double vang = -(base - 30.0) * 0.05;
+    if (vang < -7.0) vang = -7.0;
+    if (vang > 5.0) vang = 5.0;
+    vang = (vang - 10.0) * rad; /* FD camera pan */
+    double tan_up = tan(half_fov + vang);
+    double tan_down = tan(half_fov - vang);
+    double dist_y = dy / (tan_up + tan_down);
+    double yoff = dist_y * tan(vang);
+    cam.cy = yoff + (maxy - dist_y * tan_up);
+
+    double xcenter = (minx + maxx) * 0.5;
+    double hang = -xcenter * 0.05;
+    if (hang < -17.5) hang = -17.5;
+    if (hang > 17.5) hang = 17.5;
+    hang *= rad;
+    double tan_right = aspect * tan(half_fov - hang);
+    double tan_left = aspect * tan(half_fov + hang);
+    double dist_x = dx / (tan_right + tan_left);
+    double xoff = aspect * dist_x * tan(hang);
+    cam.cx = (maxx - dist_x * tan_right) - xoff;
+
+    double distance = fmax(dist_x, dist_y);
+    if (distance < 83.0) distance = 83.0;
+    if (distance > 1000.0) distance = 1000.0;
+    cam.scale = FB_H / (2.0 * distance * tan(half_fov));
+    return cam;
+}
+
+static void build_gameplay_cameras(active_t *a) {
+    free(a->frame_cams);
+    a->frame_cams = NULL;
+    a->frame_cam_count = 0;
+    if (a->last_frame < a->start_frame) return;
+    a->frame_cam_count = (size_t)(a->last_frame - a->start_frame + 1);
+    a->frame_cams = malloc(a->frame_cam_count * sizeof(*a->frame_cams));
+    if (!a->frame_cams) { a->frame_cam_count = 0; return; }
+
+    cam_t current = a->cam;
+    for (size_t i = 0; i < a->frame_cam_count; i++) {
+        int32_t fn = a->start_frame + (int32_t)i;
+        cam_t target = gameplay_camera_target(a, fn);
+        /* Melee interpolates interest more gently than eye/depth.  FD's
+           track-smooth is 1.8: roughly 9% and 27% per 60 Hz update. */
+        current.cx += (target.cx - current.cx) * 0.09;
+        current.cy += (target.cy - current.cy) * 0.09;
+        double z = FB_H / (2.0 * current.scale * tan(19.0 *
+                   3.14159265358979323846 / 180.0));
+        double tz = FB_H / (2.0 * target.scale * tan(19.0 *
+                    3.14159265358979323846 / 180.0));
+        z += (tz - z) * 0.27;
+        current.scale = FB_H / (2.0 * z * tan(19.0 *
+                        3.14159265358979323846 / 180.0));
+        a->frame_cams[i] = current;
+    }
+}
+
+static cam_t gameplay_camera(const active_t *a, int32_t fn) {
+    int64_t idx = (int64_t)fn - a->start_frame;
+    if (a->frame_cams && idx >= 0 && (size_t)idx < a->frame_cam_count)
+        return a->frame_cams[idx];
+    return gameplay_camera_target(a, fn);
+}
+
 static void free_scene_assets(active_t *a) {
     for (unsigned i = 0; i < SLP_SLOT_COUNT; i++) {
         asset_model_free(a->models[i]);
@@ -176,6 +312,12 @@ static void free_scene_assets(active_t *a) {
     a->stage = NULL;
     free(a->stage_fb);
     a->stage_fb = NULL;
+    free(a->stage_sprite);
+    a->stage_sprite = NULL;
+    a->stage_sprite_w = a->stage_sprite_h = 0;
+    free(a->frame_cams);
+    a->frame_cams = NULL;
+    a->frame_cam_count = 0;
 }
 
 static void character_slug(uint8_t id, char *out, size_t cap) {
@@ -299,30 +441,99 @@ static void build_stage_frame(active_t *a) {
         p[0] = glow; p[1] = glow; p[2] = (uint8_t)(glow + (255 - glow) / 2);
     }
 
+}
+
+static int stage_section_visible(const asset_model_t *section,
+                                 float bounds[4]) {
+    if (render_pose_bounds(section, NULL, UINT32_MAX, 0, bounds) != 0)
+        return 0;
+    /* The remaining sections are camera-facing 3D sky domes. */
+    if (bounds[0] < -100.0f || bounds[2] > 100.0f || bounds[3] > 5.0f)
+        return 0;
+    /* Skip the two flat, overlapping top-surface material passes. */
+    return bounds[3] - bounds[1] >= 1.0f;
+}
+
+/* Rasterize the static FD mesh once at a higher world-space resolution.
+   Per-frame camera movement can then resample this sprite instead of skinning
+   and filling thousands of stage triangles sixty times per second. */
+static void build_stage_sprite(active_t *a) {
+    free(a->stage_sprite);
+    a->stage_sprite = NULL;
+    a->stage_sprite_w = a->stage_sprite_h = 0;
     if (!a->stage) return;
-    float scale = (float)(a->cam.scale * a->stage->scale);
-    float tx = (float)(FB_W / 2.0 - a->cam.cx * a->cam.scale);
-    float ty = (float)(FB_H / 2.0 + a->cam.cy * a->cam.scale);
+
+    float minx = INFINITY, miny = INFINITY;
+    float maxx = -INFINITY, maxy = -INFINITY;
     for (uint32_t i = 0; i < a->stage->section_count; i++) {
-        float bounds[4];
-        if (render_pose_bounds(&a->stage->sections[i], NULL, UINT32_MAX, 0,
-                               bounds) != 0)
-            continue;
-        /* FD sections outside the gameplay mesh are camera-facing 3D sky
-           domes. Orthographically flattening them produces screen-sized
-           black polygons, so use the authored platform/underbody sections
-           and let the 2D backdrop represent the distant scene. */
-        if (bounds[0] < -100.0f || bounds[2] > 100.0f || bounds[3] > 5.0f)
-            continue;
-        /* The first two FD groups are the horizontal top surface split into
-           overlapping material passes.  Tilting both into a side-view turns
-           their depth layers into a stack of duplicate rails.  The authored
-           underbody group already contains the visible platform silhouette. */
-        if (bounds[3] - bounds[1] < 1.0f)
-            continue;
+        float b[4];
+        if (!stage_section_visible(&a->stage->sections[i], b)) continue;
+        if (b[0] < minx) minx = b[0];
+        if (b[1] < miny) miny = b[1];
+        if (b[2] > maxx) maxx = b[2];
+        if (b[3] > maxy) maxy = b[3];
+    }
+    if (!isfinite(minx) || !isfinite(miny)) return;
+
+    const double ppu = 12.0;
+    const double pad = 2.0 * a->stage->scale;
+    a->stage_sprite_ppu = ppu;
+    a->stage_sprite_min_x = minx * a->stage->scale - pad;
+    a->stage_sprite_max_y = maxy * a->stage->scale + pad;
+    double world_max_x = maxx * a->stage->scale + pad;
+    double world_min_y = miny * a->stage->scale - pad;
+    a->stage_sprite_w = (int)ceil((world_max_x - a->stage_sprite_min_x) * ppu) + 1;
+    a->stage_sprite_h = (int)ceil((a->stage_sprite_max_y - world_min_y) * ppu) + 1;
+    size_t bytes = (size_t)a->stage_sprite_w * a->stage_sprite_h * 4;
+    a->stage_sprite = calloc(1, bytes);
+    if (!a->stage_sprite) {
+        a->stage_sprite_w = a->stage_sprite_h = 0;
+        return;
+    }
+
+    float scale = (float)(ppu * a->stage->scale);
+    float tx = (float)(-a->stage_sprite_min_x * ppu);
+    float ty = (float)(a->stage_sprite_max_y * ppu);
+    for (uint32_t i = 0; i < a->stage->section_count; i++) {
+        float b[4];
+        if (!stage_section_visible(&a->stage->sections[i], b)) continue;
         render_pose_tilted(&a->stage->sections[i], NULL, UINT32_MAX, 0, 1,
-                           scale, tx, ty, 0.0f, 0.0f,
-                           a->stage_fb, FB_W, FB_H);
+                           scale, tx, ty, 0.0f, 0.0f, a->stage_sprite,
+                           a->stage_sprite_w, a->stage_sprite_h);
+    }
+}
+
+static void render_stage_model(const active_t *a, const cam_t *cam,
+                               uint8_t *fb) {
+    if (!a->stage_sprite || !a->stage_sprite_w || !a->stage_sprite_h) return;
+    double max_x = a->stage_sprite_min_x +
+                   (a->stage_sprite_w - 1) / a->stage_sprite_ppu;
+    double min_y = a->stage_sprite_max_y -
+                   (a->stage_sprite_h - 1) / a->stage_sprite_ppu;
+    int x0, y0, x1, y1;
+    world_to_screen(cam, a->stage_sprite_min_x, a->stage_sprite_max_y,
+                    &x0, &y0);
+    world_to_screen(cam, max_x, min_y, &x1, &y1);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= FB_W) x1 = FB_W - 1;
+    if (y1 >= FB_H) y1 = FB_H - 1;
+    if (x0 > x1 || y0 > y1) return;
+
+    for (int y = y0; y <= y1; y++) {
+        double wy = cam->cy - ((y + 0.5) - FB_H / 2.0) / cam->scale;
+        int v = (int)((a->stage_sprite_max_y - wy) * a->stage_sprite_ppu);
+        if (v < 0 || v >= a->stage_sprite_h) continue;
+        for (int x = x0; x <= x1; x++) {
+            double wx = ((x + 0.5) - FB_W / 2.0) / cam->scale + cam->cx;
+            int u = (int)((wx - a->stage_sprite_min_x) * a->stage_sprite_ppu);
+            if (u < 0 || u >= a->stage_sprite_w) continue;
+            const uint8_t *src = &a->stage_sprite[
+                ((size_t)v * a->stage_sprite_w + u) * 4];
+            if (!src[3]) continue;
+            uint8_t *dst = &fb[((size_t)y * FB_W + x) * 4];
+            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+        }
     }
 }
 
@@ -347,14 +558,16 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
     }
 
     const slp_game_start_t *gs = &a->replay.game_start;
-    if (!a->stage) draw_stage(gs, &a->cam);
+    cam_t cam = gameplay_camera(a, fn);
+    if (a->stage) render_stage_model(a, &cam, g_fb);
+    else draw_stage(gs, &cam);
 
     const slp_item_list_t *items = slp_items_at(&a->replay, fn);
     if (items) {
         for (size_t i = 0; i < items->count; i++) {
             const slp_item_t *it = &items->items[i];
             int sx, sy;
-            world_to_screen(&a->cam, it->x, it->y, &sx, &sy);
+            world_to_screen(&cam, it->x, it->y, &sx, &sy);
             if (it->type_id == 0x36 || it->type_id == 0x37) {
                 color_t glow = it->type_id == 0x36
                     ? (color_t){255, 76, 64, 235}
@@ -378,7 +591,7 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
             const slp_frame_t *f = slp_frame_at(&a->replay, port, pass != 0, fn);
             if (!f || f->frame_number != fn) continue;
             int sx, sy;
-            world_to_screen(&a->cam, f->x, f->y, &sx, &sy);
+            world_to_screen(&cam, f->x, f->y, &sx, &sy);
 
             unsigned slot = port * 2u + (unsigned)(pass != 0);
             const asset_model_t *model = a->models[slot];
@@ -393,11 +606,11 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
             if (model) {
                 render_pose_profile(model, anims, action, f->anim_frame,
                                     f->facing < 0 ? -1 : 1,
-                                    (float)a->cam.scale, (float)sx, (float)sy,
+                                    (float)cam.scale, (float)sx, (float)sy,
                                     g_fb, FB_W, FB_H);
                 if (f->action_state >= 178 && f->action_state <= 182 &&
                     f->shield_size > 0 && pass == 0) {
-                    double rad = f->shield_size * 0.25 * a->cam.scale;
+                    double rad = f->shield_size * 0.25 * cam.scale;
                     fill_circle(sx, sy, (int)rad,
                                 (color_t){120, 200, 255, 85});
                 }
@@ -406,7 +619,7 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
 
             double half_w = 9, half_h = 17;
             if (pass == 1) { half_w = 7; half_h = 13; }
-            double px = half_w * a->cam.scale, py = half_h * a->cam.scale;
+            double px = half_w * cam.scale, py = half_h * cam.scale;
             int rx = (int)px, ry = (int)py;
 
             /* body */
@@ -416,7 +629,7 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
             /* shield */
             if (f->action_state >= 178 && f->action_state <= 182 &&
                 f->shield_size > 0 && pass == 0) {
-                double rad = f->shield_size * 0.25 * a->cam.scale;
+                double rad = f->shield_size * 0.25 * cam.scale;
                 fill_circle(sx, sy, (int)rad,
                             (color_t){120, 200, 255, 110});
             }
@@ -657,6 +870,9 @@ static int load_replay(const char *dir, const char *name) {
         g_active.last_frame =
             (int32_t)((int64_t)replay.frame_count - SLP_FRAME_BASE - 1);
     load_scene_assets(&g_active);
+    build_stage_sprite(&g_active);
+    compute_stage_camera(g_active.stage, &g_active.cam);
+    build_gameplay_cameras(&g_active);
     build_stage_frame(&g_active);
     pthread_rwlock_unlock(&g_lock);
     return 0;
@@ -748,7 +964,9 @@ static size_t png_encode(const uint8_t *rgba, int w, int h, uint8_t **out) {
     uLongf clen = compressBound(raw_len);
     uint8_t *z = malloc(clen);
     if (!z) { free(raw); return 0; }
-    if (compress2(z, &clen, raw, raw_len, 6) != Z_OK) {
+    /* Frames are transient playback data; prioritize keeping the producer
+       ahead of 60 fps over archival PNG size. */
+    if (compress2(z, &clen, raw, raw_len, Z_BEST_SPEED) != Z_OK) {
         free(raw); free(z); return 0;
     }
     free(raw);
@@ -780,6 +998,22 @@ static size_t png_encode(const uint8_t *rgba, int w, int h, uint8_t **out) {
     return p;
 }
 
+/* Gameplay frames use deflated RGBA rather than PNG.  The browser can put
+   the resulting ImageData directly on the canvas without its comparatively
+   expensive PNG-to-ImageBitmap path. */
+static size_t rgba_deflate(const uint8_t *rgba, size_t len, uint8_t **out) {
+    uLongf compressed_len = compressBound(len);
+    uint8_t *compressed = malloc(compressed_len);
+    if (!compressed) return 0;
+    if (compress2(compressed, &compressed_len, rgba, len,
+                  Z_BEST_SPEED) != Z_OK) {
+        free(compressed);
+        return 0;
+    }
+    *out = compressed;
+    return (size_t)compressed_len;
+}
+
 /* ------------------------------------------------------------------ */
 /* Request handlers                                                    */
 /* ------------------------------------------------------------------ */
@@ -791,15 +1025,15 @@ static int build_frame_body_locked(int32_t fn, uint8_t **out, size_t *out_len) {
     render_frame(&g_active, fn, fb);
     char json[16384];
     frame_json(&g_active, fn, json, sizeof json);
-    uint8_t *png;
-    size_t plen = png_encode(fb, FB_W, FB_H, &png);
+    uint8_t *pixels;
+    size_t pixels_len = rgba_deflate(fb, FB_BYTES, &pixels);
     free(fb);
-    if (!plen) return -1;
+    if (!pixels_len) return -1;
     size_t jlen = strlen(json);
-    size_t body_len = 4 + jlen + plen;
+    size_t body_len = 4 + jlen + pixels_len;
     uint8_t *body = malloc(body_len);
     if (!body) {
-        free(png);
+        free(pixels);
         return -1;
     }
     body[0] = (uint8_t)(jlen >> 24);
@@ -807,8 +1041,8 @@ static int build_frame_body_locked(int32_t fn, uint8_t **out, size_t *out_len) {
     body[2] = (uint8_t)(jlen >> 8);
     body[3] = (uint8_t)jlen;
     memcpy(body + 4, json, jlen);
-    memcpy(body + 4 + jlen, png, plen);
-    free(png);
+    memcpy(body + 4 + jlen, pixels, pixels_len);
+    free(pixels);
     *out = body;
     *out_len = body_len;
     return 0;
@@ -1072,7 +1306,7 @@ static const char *html_doc =
     "#help{color:#666;font-size:11px;margin-top:6px}"
     "</style></head><body>"
     "<h1>Melee 2D Replay</h1>"
-    "<div id=wrap><canvas id=cv width=720 height=405></canvas>"
+    "<div id=wrap><canvas id=cv width=960 height=720></canvas>"
     "<div id=hud></div></div>"
     "<div id=bar>"
     "<select id=sel></select>"
@@ -1093,7 +1327,7 @@ static const char *html_doc =
     "const pngCache=new Map(),pending=new Map();"
     "let nextFill=0,inflight=0;"
     "const MAX_BATCH=2,BATCH=30,PREFETCH=120,START_BUFFER=30,STEP=1000/60;"
-    "const W=720,H=405;"
+    "const W=960,H=720;"
     "const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];"
     "async function fetchReplays(){"
     "const r=await fetch('/api/replays');const list=await r.json();"
@@ -1152,9 +1386,10 @@ static const char *html_doc =
     "const dv=new DataView(ab);"
     "const jlen=dv.getUint32(0,false);"
     "const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4,jlen)));"
-    "const bmp=await createImageBitmap(new Blob([ab.slice(4+jlen)],{type:'image/png'}));"
-    "if(my!==seq){bmp.close();return;}"
-    "ctx.drawImage(bmp,0,0);bmp.close();"
+    "const packed=new Blob([ab.slice(4+jlen)]).stream();"
+    "const raw=await new Response(packed.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();"
+    "if(my!==seq)return;"
+    "ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),W,H),0,0);"
     "rendered++;const now=performance.now();"
     "if(now-fpsT>=1000){fps=rendered*1000/(now-fpsT);rendered=0;fpsT=now;}"
     "fl.textContent=st.frame+' / '+info.last+(playing?' · '+fps.toFixed(0)+' fps':'');"
