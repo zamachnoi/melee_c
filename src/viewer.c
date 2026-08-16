@@ -6,7 +6,13 @@
  *
  * Endpoints:
  *   GET /                     HTML+JS frontend
- *   GET /api/replays          JSON list of .slp files in the data dir
+ *   GET /api/replays          JSON list with immutable replay ids
+ *   POST /api/replays         upload raw .slp, returns immutable replay id
+ *   GET /api/replays/{id}/manifest replay-scoped metadata and asset URLs
+ *   GET /api/replays/{id}/timeline completed replay state snapshot
+ *   GET /assets/v4/...        immutable, allowlisted schema-4 assets
+ *
+ * Legacy software-renderer endpoints (kept as the migration oracle):
  *   GET /api/set?f=<name>     load <name> as the active replay
  *   POST /api/upload?f=<name> upload an .slp file (raw body) and load it
  *   GET /api/info             JSON about the active replay
@@ -28,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -37,7 +44,10 @@
 
 #include "asset.h"
 #include "parser.h"
+#include "protocol.h"
 #include "render.h"
+#include "sha256.h"
+#include "timeline.h"
 
 #define FB_W 960
 #define FB_H 720
@@ -78,6 +88,8 @@ static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
 static _Thread_local uint8_t *g_fb;
 static char g_dir[1024] = "./replays";
 static char g_web_dir[1024] = "./web";
+
+static char *read_whole_file(const char *path, size_t *len);
 
 static const char *asset_dir(void) {
     const char *dir = getenv("ASSET_DIR");
@@ -348,11 +360,12 @@ static void load_scene_assets(active_t *a) {
         if (!sample) continue;
         char slug[64], model_path[512], anim_path[512];
         character_slug(sample->character_id, slug, sizeof slug);
+        const char *anim_slug = sample->character_id == 11 ? "popo" : slug;
         unsigned costume = gs->costume_index[port];
         snprintf(model_path, sizeof model_path, "%s/%s-%u.model",
                  asset_dir(), slug, costume);
         snprintf(anim_path, sizeof anim_path, "%s/%s-%u.anims",
-                 asset_dir(), slug, costume);
+                 asset_dir(), anim_slug, costume);
         a->models[slot] = asset_model_load(model_path);
         a->anims[slot] = asset_anims_load(anim_path);
     }
@@ -712,19 +725,32 @@ static void send_all(int cfd, const void *data, size_t len) {
     }
 }
 
-static void send_response(int cfd, const char *ctype, const void *body,
-                          size_t len) {
-    char head[512];
+static void send_response_headers(int cfd, int status, const char *reason,
+                                  const char *ctype, const char *headers,
+                                  const void *body, size_t len) {
+    char head[2048];
     int hl = snprintf(head, sizeof head,
-                      "HTTP/1.1 200 OK\r\n"
+                      "HTTP/1.1 %d %s\r\n"
                       "Content-Type: %s\r\n"
                       "Content-Length: %zu\r\n"
                       "Connection: close\r\n"
                       "Access-Control-Allow-Origin: *\r\n"
+                      "%s"
                       "\r\n",
-                      ctype, len);
+                      status, reason, ctype, len, headers ? headers : "");
     send_all(cfd, head, (size_t)hl);
-    send_all(cfd, body, len);
+    if (body && len) send_all(cfd, body, len);
+}
+
+static void send_response(int cfd, const char *ctype, const void *body,
+                          size_t len) {
+    send_response_headers(cfd, 200, "OK", ctype, NULL, body, len);
+}
+
+static void send_error(int cfd, int status, const char *reason,
+                       const char *message) {
+    send_response_headers(cfd, status, reason, "text/plain; charset=utf-8",
+                          NULL, message, strlen(message));
 }
 
 /* Reads request headers into buf. Returns 0 on success. */
@@ -836,10 +862,7 @@ static int read_body(int cfd, char *buf, size_t len) {
 /* Replay management                                                   */
 /* ------------------------------------------------------------------ */
 
-static int load_replay(const char *dir, const char *name) {
-    char path[1400];
-    snprintf(path, sizeof path, "%s/%s", dir, name);
-
+static int parse_replay_path(const char *path, slp_replay_t *replay) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     fseek(f, 0, SEEK_END);
@@ -853,10 +876,18 @@ static int load_replay(const char *dir, const char *name) {
     }
     fclose(f);
 
-    slp_replay_t replay;
-    slp_error_t e = slp_parse(data, (size_t)sz, &replay);
+    slp_error_t e = slp_parse(data, (size_t)sz, replay);
     free(data);
     if (e != SLP_OK) return -1;
+    return 0;
+}
+
+static int load_replay(const char *dir, const char *name) {
+    char path[1400];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+
+    slp_replay_t replay;
+    if (parse_replay_path(path, &replay) != 0) return -1;
 
     pthread_rwlock_wrlock(&g_lock);
     free_scene_assets(&g_active);
@@ -876,6 +907,95 @@ static int load_replay(const char *dir, const char *name) {
     build_stage_frame(&g_active);
     pthread_rwlock_unlock(&g_lock);
     return 0;
+}
+
+static int valid_replay_id(const char *id) {
+    if (strlen(id) != 64) return 0;
+    for (size_t i = 0; i < 64; i++)
+        if (!((id[i] >= '0' && id[i] <= '9') ||
+              (id[i] >= 'a' && id[i] <= 'f')))
+            return 0;
+    return 1;
+}
+
+static int replay_file_id(const char *path, char id[65]) {
+    uint8_t digest[32];
+    if (sha256_file(path, digest) != 0) return -1;
+    sha256_hex(digest, id);
+    return 0;
+}
+
+static int replay_display_name_valid(const char *name) {
+    size_t len = strlen(name);
+    if (len < 5 || len >= 256 || strcasecmp(name + len - 4, ".slp") != 0)
+        return 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+        if (*p < 0x20 || *p == 0x7f || *p == '/' || *p == '\\') return 0;
+    return 1;
+}
+
+static void replay_display_name(const char *id, const char *fallback,
+                                char *out, size_t cap) {
+    char sidecar[1400];
+    snprintf(sidecar, sizeof sidecar, "%s/%s.name", g_dir, id);
+    size_t len = 0;
+    char *saved = read_whole_file(sidecar, &len);
+    if (saved && replay_display_name_valid(saved))
+        snprintf(out, cap, "%s", saved);
+    else
+        snprintf(out, cap, "%s", fallback);
+    free(saved);
+}
+
+static int write_replay_display_name(const char *id, const char *name) {
+    if (!replay_display_name_valid(name)) return -1;
+    char path[1400];
+    snprintf(path, sizeof path, "%s/%s.name", g_dir, id);
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t len = strlen(name);
+    size_t written = fwrite(name, 1, len, f);
+    int closed = fclose(f);
+    int ok = written == len && closed == 0;
+    return ok ? 0 : -1;
+}
+
+/* Resolve by content, not by process-global selection.  Files uploaded through
+   POST /api/replays are named by id; legacy named files are hashed on lookup. */
+static int find_replay_by_id(const char *id, char *path, size_t path_cap,
+                             char *name, size_t name_cap) {
+    if (!valid_replay_id(id)) return -1;
+    char direct[1400];
+    snprintf(direct, sizeof direct, "%s/%s.slp", g_dir, id);
+    struct stat st;
+    if (stat(direct, &st) == 0 && S_ISREG(st.st_mode)) {
+        char direct_id[65];
+        if (replay_file_id(direct, direct_id) == 0 && strcmp(direct_id, id) == 0) {
+            snprintf(path, path_cap, "%s", direct);
+            char fallback[80]; snprintf(fallback, sizeof fallback, "%s.slp", id);
+            replay_display_name(id, fallback, name, name_cap);
+            return 0;
+        }
+    }
+    DIR *dir = opendir(g_dir);
+    if (!dir) return -1;
+    int found = -1;
+    struct dirent *ent;
+    while ((ent = readdir(dir))) {
+        size_t len = strlen(ent->d_name);
+        if (len <= 4 || strcmp(ent->d_name + len - 4, ".slp") != 0) continue;
+        char candidate[1400], candidate_id[65];
+        snprintf(candidate, sizeof candidate, "%s/%s", g_dir, ent->d_name);
+        if (replay_file_id(candidate, candidate_id) == 0 &&
+            strcmp(candidate_id, id) == 0) {
+            snprintf(path, path_cap, "%s", candidate);
+            replay_display_name(id, ent->d_name, name, name_cap);
+            found = 0;
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
 }
 
 static int sanitize_name(const char *in, char *out, size_t cap) {
@@ -913,11 +1033,28 @@ static int replays_json(char *buf, size_t cap) {
             }
     size_t o = 0;
     o += (size_t)snprintf(buf + o, cap - o, "[");
+    bool emitted = false;
+    char emitted_ids[256][65];
+    size_t emitted_count = 0;
     for (size_t i = 0; i < count; i++) {
-        if (i) o += (size_t)snprintf(buf + o, cap - o, ",");
-        char esc[600];
-        json_escape(names[i], esc, sizeof esc);
-        o += (size_t)snprintf(buf + o, cap - o, "{\"name\":\"%s\"}", esc);
+        if (o + 1200 >= cap) break;
+        char path[1400], id[65];
+        snprintf(path, sizeof path, "%s/%s", g_dir, names[i]);
+        if (replay_file_id(path, id) != 0) continue;
+        bool duplicate = false;
+        for (size_t j = 0; j < emitted_count; j++)
+            if (strcmp(emitted_ids[j], id) == 0) { duplicate = true; break; }
+        if (duplicate) continue;
+        snprintf(emitted_ids[emitted_count++], 65, "%s", id);
+        if (emitted) o += (size_t)snprintf(buf + o, cap - o, ",");
+        char display[256], esc[600], file_esc[600];
+        replay_display_name(id, names[i], display, sizeof display);
+        json_escape(display, esc, sizeof esc);
+        json_escape(names[i], file_esc, sizeof file_esc);
+        o += (size_t)snprintf(buf + o, cap - o,
+                              "{\"id\":\"%s\",\"name\":\"%s\","
+                              "\"file\":\"%s\"}", id, esc, file_esc);
+        emitted = true;
     }
     o += (size_t)snprintf(buf + o, cap - o, "]");
     return (int)o;
@@ -1281,6 +1418,329 @@ static void handle_upload(int cfd, const char *query, size_t content_len,
 }
 
 /* ------------------------------------------------------------------ */
+/* Stateless replay and immutable asset API                            */
+/* ------------------------------------------------------------------ */
+
+static int32_t replay_end_frame(const slp_replay_t *r) {
+    if (r->last_frame != INT32_MIN) return r->last_frame;
+    return (int32_t)((int64_t)r->frame_count - SLP_FRAME_BASE - 1);
+}
+
+static const slp_frame_t *first_exact_frame(const slp_replay_t *r,
+                                             unsigned slot, int32_t start,
+                                             int32_t end) {
+    for (int32_t fn = start; fn <= end; fn++) {
+        const slp_frame_t *f = slp_frame_at(r, slot / 2, slot & 1, fn);
+        if (f && f->frame_number == fn) return f;
+        if (fn == INT32_MAX) break;
+    }
+    return NULL;
+}
+
+static timeline_camera_t *make_timeline_cameras(const slp_replay_t *r,
+                                                 int32_t start, int32_t end,
+                                                 size_t *count_out) {
+    size_t count = (size_t)((int64_t)end - start + 1);
+    active_t temp;
+    memset(&temp, 0, sizeof temp);
+    temp.replay = *r; /* borrowed: only the camera arrays below are owned */
+    temp.start_frame = start;
+    temp.last_frame = end;
+    compute_camera(&temp.replay, &temp.cam);
+    if (r->game_start.stage_id == 32) {
+        char stage_path[1400];
+        snprintf(stage_path, sizeof stage_path, "%s/fd.stage", asset_dir());
+        temp.stage = asset_stage_load(stage_path);
+        compute_stage_camera(temp.stage, &temp.cam);
+    }
+    build_gameplay_cameras(&temp);
+    timeline_camera_t *samples = malloc(count * sizeof(*samples));
+    if (!samples) {
+        free(temp.frame_cams);
+        asset_stage_free(temp.stage);
+        return NULL;
+    }
+    for (size_t i = 0; i < count; i++) {
+        cam_t cam = temp.frame_cams ? temp.frame_cams[i]
+                                   : gameplay_camera_target(&temp, start + (int32_t)i);
+        samples[i].x = (float)cam.cx;
+        samples[i].y = (float)cam.cy;
+        samples[i].zoom = (float)cam.scale;
+    }
+    free(temp.frame_cams);
+    asset_stage_free(temp.stage);
+    *count_out = count;
+    return samples;
+}
+
+static int request_etag_matches(const char *req, const char *etag) {
+    char value[256];
+    return header_value(req, "If-None-Match", value, sizeof value) == 0 &&
+           strcmp(value, etag) == 0;
+}
+
+static void send_immutable(int cfd, const char *req, const char *ctype,
+                           const char *etag, const void *body, size_t len) {
+    char headers[512];
+    snprintf(headers, sizeof headers,
+             "Cache-Control: public, max-age=31536000, immutable\r\n"
+             "ETag: %s\r\n", etag);
+    if (request_etag_matches(req, etag)) {
+        send_response_headers(cfd, 304, "Not Modified", ctype, headers,
+                              NULL, 0);
+        return;
+    }
+    send_response_headers(cfd, 200, "OK", ctype, headers, body, len);
+}
+
+static void handle_replay_manifest(int cfd, const char *req, const char *id) {
+    char path[1400], name[256];
+    if (find_replay_by_id(id, path, sizeof path, name, sizeof name) != 0) {
+        send_error(cfd, 404, "Not Found", "unknown replay id");
+        return;
+    }
+    slp_replay_t replay;
+    if (parse_replay_path(path, &replay) != 0) {
+        send_error(cfd, 422, "Unprocessable Content", "invalid replay");
+        return;
+    }
+    int32_t start = -SLP_FRAME_BASE, end = replay_end_frame(&replay);
+    char json[16384], escaped_name[600];
+    json_escape(name, escaped_name, sizeof escaped_name);
+    size_t o = (size_t)snprintf(json, sizeof json,
+        "{\"id\":\"%s\",\"name\":\"%s\",\"completed\":true,"
+        "\"assetSchema\":%u,\"timelineSchema\":%u,\"liveProtocol\":%u,"
+        "\"startFrame\":%d,\"endFrame\":%d,\"stageId\":%u,"
+        "\"stageName\":\"%s\",\"timelineUrl\":\"/api/replays/%s/timeline\","
+        "\"players\":[",
+        id, escaped_name, ASSET_SCHEMA_VERSION, TIMELINE_SCHEMA_VERSION,
+        LIVE_PROTOCOL_VERSION, start, end, replay.game_start.stage_id,
+        slp_stage_name(replay.game_start.stage_id), id);
+    bool first = true;
+    for (unsigned port = 0; port < SLP_MAX_PORTS; port++) {
+        if (!replay.game_start.has_player[port]) continue;
+        char player_name[96];
+        json_escape(replay.game_start.name[port], player_name, sizeof player_name);
+        o += (size_t)snprintf(json + o, sizeof json - o,
+            "%s{\"port\":%u,\"name\":\"%s\",\"characterId\":%u,"
+            "\"costume\":%u,\"stocks\":%u}", first ? "" : ",", port,
+            player_name, replay.game_start.external_char_id[port],
+            replay.game_start.costume_index[port], replay.game_start.stock_count[port]);
+        first = false;
+    }
+    o += (size_t)snprintf(json + o, sizeof json - o, "],\"assets\":[");
+    first = true;
+    for (unsigned slot = 0; slot < SLP_SLOT_COUNT; slot++) {
+        if (!replay.slots[slot].active) continue;
+        const slp_frame_t *sample = first_exact_frame(&replay, slot, start, end);
+        if (!sample) continue;
+        char slug[64]; character_slug(sample->character_id, slug, sizeof slug);
+        const char *anim_slug = sample->character_id == 11 ? "popo" : slug;
+        unsigned costume = replay.game_start.costume_index[slot / 2];
+        o += (size_t)snprintf(json + o, sizeof json - o,
+            "%s{\"slot\":%u,\"model\":\"/assets/v4/models/%s-%u.model\","
+            "\"animations\":\"/assets/v4/anims/%s-%u.anims\"}",
+            first ? "" : ",", slot, slug, costume, anim_slug, costume);
+        first = false;
+    }
+    if (replay.game_start.stage_id == 32)
+        o += (size_t)snprintf(json + o, sizeof json - o,
+                             "%s{\"stage\":\"/assets/v4/stages/fd.stage\"}",
+                             first ? "" : ",");
+    o += (size_t)snprintf(json + o, sizeof json - o, "]}");
+    slp_replay_free(&replay);
+    if (o >= sizeof json) {
+        send_error(cfd, 500, "Internal Server Error", "manifest overflow");
+        return;
+    }
+    char etag[96]; snprintf(etag, sizeof etag, "\"%s:manifest-1\"", id);
+    send_immutable(cfd, req, "application/json", etag, json, o);
+}
+
+static void handle_replay_timeline(int cfd, const char *req, const char *id) {
+    char path[1400], name[256];
+    if (find_replay_by_id(id, path, sizeof path, name, sizeof name) != 0) {
+        send_error(cfd, 404, "Not Found", "unknown replay id");
+        return;
+    }
+    slp_replay_t replay;
+    if (parse_replay_path(path, &replay) != 0) {
+        send_error(cfd, 422, "Unprocessable Content", "invalid replay");
+        return;
+    }
+    int32_t start = -SLP_FRAME_BASE, end = replay_end_frame(&replay);
+    size_t camera_count = 0;
+    timeline_camera_t *cameras = make_timeline_cameras(&replay, start, end,
+                                                        &camera_count);
+    timeline_blob_t blob = {0};
+    int result = cameras ? timeline_serialize(&replay, start, end, cameras,
+                                               camera_count, &blob) : -1;
+    free(cameras);
+    slp_replay_free(&replay);
+    if (result != 0) {
+        send_error(cfd, 500, "Internal Server Error", "timeline serialization failed");
+        return;
+    }
+    char etag[96];
+    snprintf(etag, sizeof etag, "\"%s:timeline-%u\"", id,
+             TIMELINE_SCHEMA_VERSION);
+    send_immutable(cfd, req, "application/vnd.melee.timeline", etag,
+                   blob.data, blob.len);
+    timeline_blob_free(&blob);
+}
+
+static void handle_replay_reference(int cfd, const char *id,
+                                    const char *query) {
+    char nbuf[32];
+    if (query_value(query, "n", nbuf, sizeof nbuf) != 0) {
+        send_error(cfd, 400, "Bad Request", "missing frame n"); return;
+    }
+    char path[1400], name[256];
+    if (find_replay_by_id(id, path, sizeof path, name, sizeof name) != 0) {
+        send_error(cfd, 404, "Not Found", "unknown replay id"); return;
+    }
+    active_t reference;
+    memset(&reference, 0, sizeof reference);
+    if (parse_replay_path(path, &reference.replay) != 0) {
+        send_error(cfd, 422, "Unprocessable Content", "invalid replay"); return;
+    }
+    snprintf(reference.name, sizeof reference.name, "%s", name);
+    reference.start_frame = -SLP_FRAME_BASE;
+    reference.last_frame = replay_end_frame(&reference.replay);
+    int32_t frame = (int32_t)strtol(nbuf, NULL, 10);
+    if (frame < reference.start_frame || frame > reference.last_frame) {
+        slp_replay_free(&reference.replay);
+        send_error(cfd, 400, "Bad Request", "frame outside replay"); return;
+    }
+    compute_camera(&reference.replay, &reference.cam);
+    load_scene_assets(&reference);
+    build_stage_sprite(&reference);
+    compute_stage_camera(reference.stage, &reference.cam);
+    build_gameplay_cameras(&reference);
+    build_stage_frame(&reference);
+    uint8_t *rgba = malloc(FB_BYTES), *png = NULL;
+    size_t png_len = 0;
+    if (rgba) {
+        render_frame(&reference, frame, rgba);
+        png_len = png_encode(rgba, FB_W, FB_H, &png);
+    }
+    free(rgba);
+    free_scene_assets(&reference);
+    slp_replay_free(&reference.replay);
+    if (!png_len) {
+        send_error(cfd, 500, "Internal Server Error", "reference render failed"); return;
+    }
+    send_response_headers(cfd, 200, "OK", "image/png",
+                          "Cache-Control: no-cache\r\n", png, png_len);
+    free(png);
+}
+
+static void handle_create_replay(int cfd, size_t content_len,
+                                 const char *initial, size_t initial_len,
+                                 const char *display_name) {
+    if (display_name && display_name[0] &&
+        !replay_display_name_valid(display_name)) {
+        send_error(cfd, 400, "Bad Request", "invalid X-Replay-Name");
+        return;
+    }
+    if (!content_len || content_len > 128u * 1024u * 1024u) {
+        send_error(cfd, 413, "Content Too Large", "replay must be 1..134217728 bytes");
+        return;
+    }
+    uint8_t *body = malloc(content_len);
+    if (!body) { send_error(cfd, 500, "Internal Server Error", "oom"); return; }
+    if (initial_len > content_len) initial_len = content_len;
+    memcpy(body, initial, initial_len);
+    if (read_body(cfd, (char *)body + initial_len, content_len - initial_len) != 0) {
+        free(body); send_error(cfd, 400, "Bad Request", "truncated upload"); return;
+    }
+    slp_replay_t replay;
+    slp_error_t error = slp_parse(body, content_len, &replay);
+    if (error != SLP_OK) {
+        free(body); send_error(cfd, 422, "Unprocessable Content", slp_error_string(error)); return;
+    }
+    slp_replay_free(&replay);
+    uint8_t digest[32]; char id[65];
+    sha256_bytes(body, content_len, digest); sha256_hex(digest, id);
+    char path[1400]; snprintf(path, sizeof path, "%s/%s.slp", g_dir, id);
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        char temp[1500];
+        snprintf(temp, sizeof temp, "%s/.upload-%s-%lu.tmp", g_dir, id,
+                 (unsigned long)pthread_self());
+        FILE *f = fopen(temp, "wb");
+        int stored = 0;
+        if (f) {
+            size_t written = fwrite(body, 1, content_len, f);
+            int flushed = fflush(f);
+            int closed = fclose(f);
+            if (written == content_len && flushed == 0 && closed == 0 &&
+                rename(temp, path) == 0)
+                stored = 1;
+        }
+        if (!stored) {
+            free(body); send_error(cfd, 500, "Internal Server Error", "cannot store replay"); return;
+        }
+    }
+    if (display_name && display_name[0] &&
+        write_replay_display_name(id, display_name) != 0) {
+        free(body);
+        send_error(cfd, 400, "Bad Request", "invalid X-Replay-Name");
+        return;
+    }
+    free(body);
+    char json[768], escaped_name[600];
+    json_escape(display_name && display_name[0] ? display_name : "",
+                escaped_name, sizeof escaped_name);
+    int len = snprintf(json, sizeof json,
+                       "{\"id\":\"%s\",\"name\":\"%s\","
+                       "\"manifestUrl\":\"/api/replays/%s/manifest\"}",
+                       id, escaped_name, id);
+    send_response_headers(cfd, 201, "Created", "application/json",
+                          "Cache-Control: no-store\r\n", json, (size_t)len);
+}
+
+static int safe_asset_name(const char *name) {
+    if (!*name || strstr(name, "..") || strchr(name, '/')) return 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+        if (!(islower(*p) || isdigit(*p) || *p == '-' || *p == '_' || *p == '.'))
+            return 0;
+    return 1;
+}
+
+static void handle_asset(int cfd, const char *req, const char *path) {
+    static const char prefix[] = "/assets/v4/";
+    const char *relative = path + sizeof(prefix) - 1;
+    const char *name = NULL, *ctype = NULL, *suffix = NULL;
+    if (strncmp(relative, "models/", 7) == 0) {
+        name = relative + 7; suffix = ".model"; ctype = "application/vnd.melee.model";
+    } else if (strncmp(relative, "anims/", 6) == 0) {
+        name = relative + 6; suffix = ".anims"; ctype = "application/vnd.melee.animations";
+    } else if (strncmp(relative, "stages/", 7) == 0) {
+        name = relative + 7; suffix = ".stage"; ctype = "application/vnd.melee.stage";
+    }
+    size_t name_len = name ? strlen(name) : 0, suffix_len = suffix ? strlen(suffix) : 0;
+    if (!name || !safe_asset_name(name) || name_len <= suffix_len ||
+        strcmp(name + name_len - suffix_len, suffix) != 0) {
+        send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return;
+    }
+    char file_path[1400]; snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
+    size_t len = 0; char *body = read_whole_file(file_path, &len);
+    if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
+    if (len < 8 || (uint8_t)body[0] != 'M' || (uint8_t)body[1] != 'D' ||
+        (uint8_t)body[2] != 'L' || body[3] != 0 ||
+        (uint8_t)body[4] != 0 || (uint8_t)body[5] != 0 ||
+        (uint8_t)body[6] != 0 || (uint8_t)body[7] != ASSET_SCHEMA_VERSION) {
+        free(body); send_error(cfd, 422, "Unprocessable Content", "invalid asset header"); return;
+    }
+    uint8_t digest[32]; char hex[65], etag[72];
+    sha256_bytes(body, len, digest); sha256_hex(digest, hex);
+    snprintf(etag, sizeof etag, "\"%.64s\"", hex);
+    send_immutable(cfd, req, ctype, etag, body, len);
+    free(body);
+}
+
+/* ------------------------------------------------------------------ */
 /* Frontend                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1331,9 +1791,11 @@ static const char *html_doc =
     "const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];"
     "async function fetchReplays(){"
     "const r=await fetch('/api/replays');const list=await r.json();"
-    "sel.innerHTML=list.map(r=>`<option>${r.name}</option>`).join('');"
+    "const replayFile=r=>r.file||r.name;"
+    "sel.replaceChildren(...list.map(r=>{const o=document.createElement('option');"
+    "o.value=replayFile(r);o.textContent=r.name;return o;}));"
     "if(!list.length)return;"
-    "if(!info||!list.some(r=>r.name===info.name)){await load(list[0].name);}"
+    "if(!info||!list.some(r=>replayFile(r)===info.name)){await load(replayFile(list[0]));}"
     "}"
     "function requestFrame(n){"
     "if(pngCache.has(n))return Promise.resolve(pngCache.get(n));"
@@ -1482,6 +1944,53 @@ static void handle_root(int cfd) {
     }
 }
 
+static int web_module_path(const char *path) {
+    if (strcmp(path, "/main.js") != 0 &&
+        strncmp(path, "/assets/", 8) != 0 &&
+        strncmp(path, "/replay/", 8) != 0 &&
+        strncmp(path, "/renderer/", 10) != 0)
+        return 0;
+    if (strstr(path, "..") || !strstr(path, ".js")) return 0;
+    size_t len = strlen(path);
+    if (len < 3 || strcmp(path + len - 3, ".js") != 0) return 0;
+    for (const unsigned char *p = (const unsigned char *)path + 1; *p; p++)
+        if (!(isalnum(*p) || *p == '/' || *p == '-' || *p == '_' || *p == '.'))
+            return 0;
+    return 1;
+}
+
+static void handle_web_module(int cfd, const char *path) {
+    if (!web_module_path(path)) {
+        send_error(cfd, 404, "Not Found", "module is not allowlisted");
+        return;
+    }
+    char file_path[1400];
+    snprintf(file_path, sizeof file_path, "%s/dist/%s", g_web_dir, path + 1);
+    size_t len = 0;
+    char *body = read_whole_file(file_path, &len);
+    if (!body) { send_error(cfd, 404, "Not Found", "module not found"); return; }
+    send_response_headers(cfd, 200, "OK", "text/javascript; charset=utf-8",
+                          "Cache-Control: no-cache\r\n", body, len);
+    free(body);
+}
+
+static void handle_scoped_replay(int cfd, const char *req, const char *path,
+                                 const char *query) {
+    const char *tail = path + strlen("/api/replays/");
+    const char *slash = strchr(tail, '/');
+    if (!slash || (size_t)(slash - tail) != 64) {
+        send_error(cfd, 404, "Not Found", "invalid replay route"); return;
+    }
+    char id[65]; memcpy(id, tail, 64); id[64] = '\0';
+    if (!valid_replay_id(id)) {
+        send_error(cfd, 404, "Not Found", "invalid replay id"); return;
+    }
+    if (strcmp(slash, "/manifest") == 0) handle_replay_manifest(cfd, req, id);
+    else if (strcmp(slash, "/timeline") == 0) handle_replay_timeline(cfd, req, id);
+    else if (strcmp(slash, "/reference") == 0) handle_replay_reference(cfd, id, query);
+    else send_error(cfd, 404, "Not Found", "unknown replay resource");
+}
+
 /* ------------------------------------------------------------------ */
 
 static void *conn_thread(void *arg) {
@@ -1495,13 +2004,32 @@ static void *conn_thread(void *arg) {
         parse_path_query(req, path, sizeof path, query, sizeof query);
         if (strcmp(path, "/") == 0)
             handle_root(cfd);
+        else if (web_module_path(path))
+            handle_web_module(cfd, path);
         else if (strcmp(path, "/api/info") == 0)
             handle_info(cfd);
         else if (strcmp(path, "/api/replays") == 0) {
-            char buf[4096];
-            int len = replays_json(buf, sizeof buf);
-            send_response(cfd, "application/json", buf, (size_t)len);
-        } else if (strcmp(path, "/api/frame") == 0)
+            if (strncmp(req, "POST ", 5) == 0) {
+                char cl[32] = "0";
+                header_value(req, "Content-Length", cl, sizeof cl);
+                size_t clen = (size_t)strtoul(cl, NULL, 10);
+                const char *body = strstr(req, "\r\n\r\n");
+                body = body ? body + 4 : req + req_len;
+                size_t have = (size_t)((req + req_len) - body);
+                char display_name[256] = "";
+                header_value(req, "X-Replay-Name", display_name,
+                             sizeof display_name);
+                handle_create_replay(cfd, clen, body, have, display_name);
+            } else {
+                char buf[65536];
+                int len = replays_json(buf, sizeof buf);
+                send_response(cfd, "application/json", buf, (size_t)len);
+            }
+        } else if (strncmp(path, "/api/replays/", 13) == 0)
+            handle_scoped_replay(cfd, req, path, query);
+        else if (strncmp(path, "/assets/v4/", 11) == 0)
+            handle_asset(cfd, req, path);
+        else if (strcmp(path, "/api/frame") == 0)
             handle_frame(cfd, query);
         else if (strcmp(path, "/api/frames") == 0)
             handle_frames(cfd, query);
@@ -1518,7 +2046,7 @@ static void *conn_thread(void *arg) {
             size_t have = (size_t)((req + req_len) - body);
             handle_upload(cfd, query, clen, body, have);
         } else
-            send_response(cfd, "text/plain", "not found", 9);
+            send_error(cfd, 404, "Not Found", "not found");
     }
     close(cfd);
     return NULL;

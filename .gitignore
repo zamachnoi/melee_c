@@ -4,3 +4,5 @@ replays/
 cache/
 dev-server.env
 .devserver.*
+node_modules/
+web/dist/

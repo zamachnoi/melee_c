@@ -196,7 +196,7 @@ Never: GET /api/set?f=... followed by requests against shared g_active</code></p
 <h3>Frontend delivery decision</h3>
 <ul>
   <li>Use native browser ES modules rather than a production bundle initially.</li>
-  <li>Use JSDoc types plus <code>tsc --checkJs</code> for protocol, math, and renderer checking without a runtime build dependency.</li>
+  <li>Use strict TypeScript compiled to native browser ES modules without a runtime bundler.</li>
   <li>Use Node's test runner for pure timeline, asset, clock, and animation modules.</li>
   <li>Teach the C server to serve allowlisted static files with correct JavaScript, CSS, and binary MIME types.</li>
   <li>Keep shaders as JavaScript string modules initially so shader loading cannot race or require another fetch.</li>
@@ -445,7 +445,7 @@ frame = clamp(frame, startFrame, endFrame)</code></pre>
       <li>Define independent asset, timeline, and live protocol versions.</li>
       <li>Inventory schema-4 asset transfer size and decoded CPU/GPU memory.</li>
       <li>Specify stateless replay ids and remove new-feature dependence on <code>g_active</code>.</li>
-      <li>Choose native ES module serving, JSDoc type checking, and test commands.</li>
+      <li>Choose native ES module serving, strict TypeScript compilation, and test commands.</li>
       <li>Define renderer interface and camera coordinate conventions.</li>
     </ul>
     <div class="gatebox"><strong>Exit gate:</strong> fixtures and byte-level contracts are reviewed before browser implementation starts.</div>

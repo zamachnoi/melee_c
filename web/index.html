@@ -86,9 +86,11 @@ ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),W,H),0,0);}})();
 }
 async function fetchReplays(){
 const r=await fetch('/api/replays');const list=await r.json();
-sel.innerHTML=list.map(r=>`<option>${r.name}</option>`).join('');
+const replayFile=r=>r.file||r.name;
+sel.replaceChildren(...list.map(r=>{const option=document.createElement('option');
+option.value=replayFile(r);option.textContent=r.name;return option;}));
 if(!list.length)return;
-if(!info||!list.some(r=>r.name===info.name)){await load(list[0].name);}
+if(!info||!list.some(r=>replayFile(r)===info.name)){await load(replayFile(list[0]));}
 }
 function requestFrame(n){
 if(pngCache.has(n))return Promise.resolve(pngCache.get(n));

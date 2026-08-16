@@ -16,10 +16,12 @@ absent, the server isn't running yet — start it with:
     make devserver
 
 (or `scripts/devserver.sh`). This builds `bin/viewer` if needed, binds the
-next free port starting at 8080, serves on 127.0.0.1, and rewrites
-`dev-server.env`. The viewer serves the web UI from `web/` and reads replays
-from `replays/` (SLP_DIR); see `src/viewer.c` for env vars (`PORT`, `HOST`,
-`WEB_DIR`, `SLP_DIR`).
+next free port starting at 8080, serves on `0.0.0.0`, and rewrites
+`dev-server.env`. The local URL remains suitable for agent checks, while the
+same port is reachable through the machine hostname (for example,
+`http://spire:8080`). The viewer serves the web UI from `web/` and reads
+replays from `replays/` (SLP_DIR); see `src/viewer.c` for env vars (`PORT`,
+`HOST`, `WEB_DIR`, `SLP_DIR`).
 
 Stop this worktree's server with:
 

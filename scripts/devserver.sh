@@ -48,6 +48,20 @@ if [ ! -x "$root/bin/viewer" ]; then
     (cd "$root" && make bin/viewer >&2)
 fi
 
+# Compile strict TypeScript sources to native browser ES modules. Fresh
+# worktrees may not have local dependencies yet, so hydrate them from the lock
+# file once before building.
+if [ ! -f "$root/web/dist/main.js" ] || \
+   find "$root/web" -path "$root/web/dist" -prune -o -name '*.ts' \
+     -newer "$root/web/dist/main.js" -print -quit 2>/dev/null | grep -q .; then
+    if [ ! -x "$root/node_modules/.bin/tsc" ]; then
+        log "installing TypeScript toolchain..."
+        (cd "$root" && npm ci >&2)
+    fi
+    log "building browser modules..."
+    (cd "$root" && npm run build >&2)
+fi
+
 # --- find a free port, reusing the one we recorded if still ours ----------
 free_port=""
 if [ -f "$env_file" ]; then
@@ -75,10 +89,11 @@ fi
 
 # --- write context file -----------------------------------------------------
 printf 'DEV_URL=http://localhost:%s\n' "$free_port" > "$env_file"
-log "dev server URL: http://localhost:$free_port  (written to $env_file)"
+public_host="${DEV_PUBLIC_HOST:-$(hostname -s)}"
+log "dev server URL: http://$public_host:$free_port  (local context written to $env_file)"
 
 # --- serve -------------------------------------------------------------------
-export HOST=127.0.0.1
+export HOST="${HOST:-0.0.0.0}"
 export PORT="$free_port"
 # SLP_DIR defaults to ./replays; keep it in the worktree root
 export SLP_DIR="${SLP_DIR:-$root/replays}"
