@@ -38,7 +38,7 @@ let info=null,playing=false,cur=0,raf=0,lastT=0,acc=0,seq=0,displaying=false;
 let rendered=0,fps=0,fpsT=performance.now();
 const pngCache=new Map(),pending=new Map();
 let nextFill=0,inflight=0;
-const MAX_BATCH=2,BATCH=30,PREFETCH=120,START_BUFFER=30,STEP=1000/60;
+const MAX_BATCH=4,BATCH=30,PREFETCH=240,START_BUFFER=120,STEP=1000/60;
 const MAX_CACHE=PREFETCH+60;
 let W=cv.width,H=cv.height;
 let ctx=null,frameWorker=null,workerSeq=0;
@@ -119,7 +119,9 @@ if(cur>nextFill)nextFill=cur+1;
 while(inflight<MAX_BATCH&&nextFill<=hi){
 while(nextFill<=hi&&pngCache.has(nextFill))nextFill++;
 if(nextFill>hi)break;
-const from=nextFill,count=Math.min(BATCH,hi-from+1);nextFill+=count;
+const available=hi-nextFill+1;
+if(available<BATCH&&hi<info.last)break;
+const from=nextFill,count=Math.min(BATCH,info.last-from+1);nextFill+=count;
 inflight++;
 requestBatch(from,count).finally(()=>{inflight--;fillCache();});
 }
