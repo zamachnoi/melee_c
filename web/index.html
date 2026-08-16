@@ -30,7 +30,7 @@ input[type=range]{flex:1;min-width:200px}
 </div>
 <div id=help>Space play/pause &middot; &larr;/&rarr; step &middot; Home/End first/last &middot; drag canvas to scrub</div>
 <script>
-const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const cv=document.getElementById('cv');
 const sel=document.getElementById('sel'),sl=document.getElementById('slider');
 const playBtn=document.getElementById('playBtn'),file=document.getElementById('file');
 const fl=document.getElementById('frameLabel'),hud=document.getElementById('hud');
@@ -39,8 +39,51 @@ let rendered=0,fps=0,fpsT=performance.now();
 const pngCache=new Map(),pending=new Map();
 let nextFill=0,inflight=0;
 const MAX_BATCH=2,BATCH=30,PREFETCH=120,START_BUFFER=30,STEP=1000/60;
+const MAX_CACHE=PREFETCH+60;
 let W=cv.width,H=cv.height;
+let ctx=null,frameWorker=null,workerSeq=0;
+const workerPending=new Map();
 const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];
+function initRenderer(){
+if(frameWorker||ctx)return;
+if('OffscreenCanvas'in window&&cv.transferControlToOffscreen&&'DecompressionStream'in window){
+const source=`let ctx;
+onmessage=async e=>{const m=e.data;
+if(m.type==='init'){ctx=m.canvas.getContext('2d');return;}
+try{const bytes=new Uint8Array(m.pixels);
+if(bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71){
+const bmp=await createImageBitmap(new Blob([m.pixels],{type:'image/png'}));
+ctx.drawImage(bmp,0,0);bmp.close();
+}else{
+const packed=new Blob([m.pixels]).stream();
+const raw=await new Response(packed.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+if(raw.byteLength!==m.w*m.h*4)throw new Error('invalid RGBA frame size');
+ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),m.w,m.h),0,0);
+}
+postMessage({id:m.id});
+}catch(error){postMessage({id:m.id,error:String(error)});}};`;
+const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+frameWorker=new Worker(url);URL.revokeObjectURL(url);
+frameWorker.onmessage=e=>{const p=workerPending.get(e.data.id);if(!p)return;
+workerPending.delete(e.data.id);e.data.error?p.reject(new Error(e.data.error)):p.resolve();};
+const offscreen=cv.transferControlToOffscreen();
+frameWorker.postMessage({type:'init',canvas:offscreen},[offscreen]);
+}else ctx=cv.getContext('2d');
+}
+function drawFrame(pixels){
+if(frameWorker){const id=++workerSeq;return new Promise((resolve,reject)=>{
+workerPending.set(id,{resolve,reject});
+frameWorker.postMessage({type:'frame',id,pixels,w:W,h:H},[pixels]);
+});}
+return(async()=>{const bytes=new Uint8Array(pixels);
+if(bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71){
+const bmp=await createImageBitmap(new Blob([pixels],{type:'image/png'}));
+ctx.drawImage(bmp,0,0);bmp.close();
+}else{const packed=new Blob([pixels]).stream();
+const raw=await new Response(packed.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+if(raw.byteLength!==W*H*4)throw new Error('invalid RGBA frame size');
+ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),W,H),0,0);}})();
+}
 async function fetchReplays(){
 const r=await fetch('/api/replays');const list=await r.json();
 sel.innerHTML=list.map(r=>`<option>${r.name}</option>`).join('');
@@ -52,14 +95,14 @@ if(pngCache.has(n))return Promise.resolve(pngCache.get(n));
 if(pending.has(n))return pending.get(n);
 const p=fetch('/api/frame?n='+n).then(r=>r.arrayBuffer()).then(ab=>{
 pngCache.set(n,ab);
-if(pngCache.size>2500){pngCache.delete(pngCache.keys().next().value);}
+while(pngCache.size>MAX_CACHE)pngCache.delete(pngCache.keys().next().value);
 pending.delete(n);return ab;
 }).catch(e=>{pending.delete(n);throw e;});
 pending.set(n,p);return p;
 }
 function cacheFrame(n,ab){
 pngCache.set(n,ab);
-while(pngCache.size>2500)pngCache.delete(pngCache.keys().next().value);
+while(pngCache.size>MAX_CACHE)pngCache.delete(pngCache.keys().next().value);
 }
 async function requestBatch(from,count){
 const ab=await fetch('/api/frames?from='+from+'&count='+count).then(r=>r.arrayBuffer());
@@ -85,6 +128,7 @@ async function load(name){
 const r=await fetch('/api/set?f='+encodeURIComponent(name));info=await r.json();
 pngCache.clear();pending.clear();inflight=0;displaying=false;seq++;
 W=info.w;H=info.h;cv.width=W;cv.height=H;
+initRenderer();
 sl.min=info.start;sl.max=info.last;cur=info.start;sl.value=cur;
 nextFill=cur+1;
 document.title='Melee 2D Replay - '+info.name;
@@ -100,18 +144,8 @@ const dv=new DataView(ab);
 const jlen=dv.getUint32(0,false);
 const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4,jlen)));
 const pixels=ab.slice(4+jlen);
-const bytes=new Uint8Array(pixels);
-if(bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71){
-const bmp=await createImageBitmap(new Blob([pixels],{type:'image/png'}));
-if(my!==seq){bmp.close();return;}
-ctx.drawImage(bmp,0,0);bmp.close();
-}else{
-const packed=new Blob([pixels]).stream();
-const raw=await new Response(packed.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+await drawFrame(pixels);
 if(my!==seq)return;
-if(raw.byteLength!==W*H*4)throw new Error('invalid RGBA frame size');
-ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),W,H),0,0);
-}
 rendered++;const now=performance.now();
 if(now-fpsT>=1000){fps=rendered*1000/(now-fpsT);rendered=0;fpsT=now;}
 fl.textContent=st.frame+' / '+info.last+(playing?' · '+fps.toFixed(0)+' fps':'');
