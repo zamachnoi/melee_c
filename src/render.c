@@ -175,6 +175,7 @@ static void eval_pose(const asset_model_t *m, const asset_anims_t *a,
 
     if (action_idx != UINT32_MAX && a) {
         const asset_action_t *act = &a->actions[action_idx];
+        const int ledge_anchored = strstr(act->name, "ACTION_Cliff") != NULL;
         float frame_number=frame<=0.0f?1.0f:frame+1.0f;
         if(act->loop&&act->end_frame>0.0f)
             while(frame_number>act->end_frame)frame_number-=act->end_frame;
@@ -191,6 +192,14 @@ static void eval_pose(const asset_model_t *m, const asset_anims_t *a,
                 trs[1] = m->bones[0].base[10];
                 trs[2] = m->bones[0].base[11];
             }
+            /* Bone 1 is the fighter's TransN joint.  Its Z channel is
+               authored root motion (35 units for dash attack/get-up rolls,
+               40 for tech rolls), but the replay position has already
+               applied that movement.  Keep the authored offset only for
+               Cliff actions: their replay position is the ledge anchor and
+               the TransN Y/Z tracks place the body below and beside it. */
+            if (ja->bone_index == 1 && !ledge_anchored)
+                trs[2] = m->bones[1].base[11];
             mtx_from_srt(scl, rot, trs, local[ja->bone_index]);
         }
     }
@@ -361,6 +370,30 @@ int render_pose_bounds(const asset_model_t *m, const asset_anims_t *a,
         if (py[i] > bounds[3]) bounds[3] = py[i];
     }
     free(px); free(py);
+    return 0;
+}
+
+int render_pose_profile_bounds(const asset_model_t *m, const asset_anims_t *a,
+                               uint32_t action_idx, float frame,
+                               float bounds[4]) {
+    if (!m || !m->vertex_count || !bounds) return -1;
+    float *px = malloc((size_t)m->vertex_count * sizeof(float));
+    float *py = malloc((size_t)m->vertex_count * sizeof(float));
+    float *pz = malloc((size_t)m->vertex_count * sizeof(float));
+    if (!px || !py || !pz) {
+        free(px); free(py); free(pz);
+        return -1;
+    }
+    transform_pose_vertices(m, a, action_idx, frame, px, py, pz);
+    bounds[0] = bounds[2] = pz[0];
+    bounds[1] = bounds[3] = py[0];
+    for (uint32_t i = 1; i < m->vertex_count; i++) {
+        if (pz[i] < bounds[0]) bounds[0] = pz[i];
+        if (py[i] < bounds[1]) bounds[1] = py[i];
+        if (pz[i] > bounds[2]) bounds[2] = pz[i];
+        if (py[i] > bounds[3]) bounds[3] = py[i];
+    }
+    free(px); free(py); free(pz);
     return 0;
 }
 
