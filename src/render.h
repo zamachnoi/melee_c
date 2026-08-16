@@ -17,6 +17,14 @@ size_t render_pose(const asset_model_t *m, const asset_anims_t *a,
                    float scale, float tx, float ty,
                    uint8_t *fb, int W, int H);
 
+/* Render a fighter in gameplay profile.  Fighter meshes are authored facing
+   along local Z, so their side silhouette uses Z horizontally and X for
+   painter depth. */
+size_t render_pose_profile(const asset_model_t *m, const asset_anims_t *a,
+                           uint32_t action_idx, float frame, int facing,
+                           float scale, float tx, float ty,
+                           uint8_t *fb, int W, int H);
+
 /* As above, with model Z contributing to projected screen X/Y.  This is
    useful for stages whose floor lies in the X/Z plane while gameplay remains
    in X/Y. */

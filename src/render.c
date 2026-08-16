@@ -183,6 +183,14 @@ static void eval_pose(const asset_model_t *m, const asset_anims_t *a,
             if (ja->bone_index >= m->bone_count) continue;
             float scl[3], rot[3], trs[3];
             sample_joint(ja, frame_number, &m->bones[ja->bone_index], scl, rot, trs);
+            /* Slippi's post-frame x/y is the fighter's authoritative world
+               root.  Applying figatree root translation as well double-counts
+               locomotion and can put grounded poses through the floor. */
+            if (ja->bone_index == 0) {
+                trs[0] = m->bones[0].base[9];
+                trs[1] = m->bones[0].base[10];
+                trs[2] = m->bones[0].base[11];
+            }
             mtx_from_srt(scl, rot, trs, local[ja->bone_index]);
         }
     }
@@ -370,10 +378,10 @@ uint32_t render_find_action(const asset_anims_t *a, const char *name) {
 /* Rasterize a posed model into fb. Returns number of triangles drawn.
    cam: world->screen affine (sx = (wx*scale)+tx, sy = -(wy*scale)+ty).
    facing < 0 mirrors on x. action_idx UINT32_MAX = bind pose. */
-size_t render_pose_tilted(const asset_model_t *m, const asset_anims_t *a,
-                          uint32_t action_idx, float frame, int facing,
-                          float scale, float tx, float ty,
-                          float z_to_x, float z_to_y,
+static size_t render_pose_projected(const asset_model_t *m,
+                          const asset_anims_t *a, uint32_t action_idx,
+                          float frame, int facing, float scale, float tx,
+                          float ty, float z_to_x, float z_to_y, int profile,
                           uint8_t *fb, int W, int H) {
     fb_t f = {fb, W, H};
 
@@ -385,9 +393,9 @@ size_t render_pose_tilted(const asset_model_t *m, const asset_anims_t *a,
     float *pz = malloc((size_t)m->vertex_count * sizeof(float));
     transform_pose_vertices(m, a, action_idx, frame, px, py, pz);
     for (uint32_t i = 0; i < m->vertex_count; i++) {
-        float x = px[i];
+        float x = profile ? pz[i] : px[i] + pz[i] * z_to_x;
         if (facing < 0) x = -x;
-        sx[i] = (x + pz[i] * z_to_x) * scale + tx;
+        sx[i] = x * scale + tx;
         sy[i] = -((py[i] + pz[i] * z_to_y) * scale) + ty;
     }
 
@@ -400,7 +408,9 @@ size_t render_pose_tilted(const asset_model_t *m, const asset_anims_t *a,
         for(uint32_t i=0;i+2<len;i+=3){
             uint32_t i0=m->indices[start+i],i1=m->indices[start+i+1],i2=m->indices[start+i+2];
             if(i0>=m->vertex_count||i1>=m->vertex_count||i2>=m->vertex_count)continue;
-            tri_refs[tri_count++]=(tri_ref_t){i0,i1,i2,pg,(pz[i0]+pz[i1]+pz[i2])/3.0f};
+            float d0=profile?px[i0]:pz[i0],d1=profile?px[i1]:pz[i1],
+                  d2=profile?px[i2]:pz[i2];
+            tri_refs[tri_count++]=(tri_ref_t){i0,i1,i2,pg,(d0+d1+d2)/3.0f};
         }
     }
     qsort(tri_refs,tri_count,sizeof*tri_refs,cmp_tri_depth);
@@ -445,10 +455,27 @@ size_t render_pose_tilted(const asset_model_t *m, const asset_anims_t *a,
     return tri_count;
 }
 
+size_t render_pose_tilted(const asset_model_t *m, const asset_anims_t *a,
+                          uint32_t action_idx, float frame, int facing,
+                          float scale, float tx, float ty,
+                          float z_to_x, float z_to_y,
+                          uint8_t *fb, int W, int H) {
+    return render_pose_projected(m, a, action_idx, frame, facing, scale, tx,
+                                 ty, z_to_x, z_to_y, 0, fb, W, H);
+}
+
 size_t render_pose(const asset_model_t *m, const asset_anims_t *a,
                    uint32_t action_idx, float frame, int facing,
                    float scale, float tx, float ty,
                    uint8_t *fb, int W, int H) {
     return render_pose_tilted(m, a, action_idx, frame, facing, scale, tx, ty,
                               0.0f, 0.0f, fb, W, H);
+}
+
+size_t render_pose_profile(const asset_model_t *m, const asset_anims_t *a,
+                           uint32_t action_idx, float frame, int facing,
+                           float scale, float tx, float ty,
+                           uint8_t *fb, int W, int H) {
+    return render_pose_projected(m, a, action_idx, frame, facing, scale, tx,
+                                 ty, 0.0f, 0.0f, 1, fb, W, H);
 }
