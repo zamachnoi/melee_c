@@ -19,7 +19,7 @@ input[type=range]{flex:1;min-width:200px}
 #help{color:#666;font-size:11px;margin-top:6px}
 </style></head><body>
 <h1>Melee 2D Replay</h1>
-<div id=wrap><canvas id=cv width=720 height=405></canvas>
+<div id=wrap><canvas id=cv width=960 height=720></canvas>
 <div id=hud></div></div>
 <div id=bar>
 <select id=sel></select>
@@ -39,7 +39,7 @@ let rendered=0,fps=0,fpsT=performance.now();
 const pngCache=new Map(),pending=new Map();
 let nextFill=0,inflight=0;
 const MAX_BATCH=2,BATCH=30,PREFETCH=120,START_BUFFER=30,STEP=1000/60;
-const W=720,H=405;
+let W=cv.width,H=cv.height;
 const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];
 async function fetchReplays(){
 const r=await fetch('/api/replays');const list=await r.json();
@@ -84,6 +84,7 @@ requestBatch(from,count).finally(()=>{inflight--;fillCache();});
 async function load(name){
 const r=await fetch('/api/set?f='+encodeURIComponent(name));info=await r.json();
 pngCache.clear();pending.clear();inflight=0;displaying=false;seq++;
+W=info.w;H=info.h;cv.width=W;cv.height=H;
 sl.min=info.start;sl.max=info.last;cur=info.start;sl.value=cur;
 nextFill=cur+1;
 document.title='Melee 2D Replay - '+info.name;
@@ -98,9 +99,19 @@ if(my!==seq)return;
 const dv=new DataView(ab);
 const jlen=dv.getUint32(0,false);
 const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4,jlen)));
-const bmp=await createImageBitmap(new Blob([ab.slice(4+jlen)],{type:'image/png'}));
+const pixels=ab.slice(4+jlen);
+const bytes=new Uint8Array(pixels);
+if(bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71){
+const bmp=await createImageBitmap(new Blob([pixels],{type:'image/png'}));
 if(my!==seq){bmp.close();return;}
 ctx.drawImage(bmp,0,0);bmp.close();
+}else{
+const packed=new Blob([pixels]).stream();
+const raw=await new Response(packed.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+if(my!==seq)return;
+if(raw.byteLength!==W*H*4)throw new Error('invalid RGBA frame size');
+ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),W,H),0,0);
+}
 rendered++;const now=performance.now();
 if(now-fpsT>=1000){fps=rendered*1000/(now-fpsT);rendered=0;fpsT=now;}
 fl.textContent=st.frame+' / '+info.last+(playing?' · '+fps.toFixed(0)+' fps':'');
@@ -111,7 +122,7 @@ return`<b style="background:${c}"></b>`+
 `<span style="color:#888"> ${p.state}</span><br>`;
 }).join('');
 fillCache();
-}catch(e){}finally{displaying=false;}
+}catch(e){console.error('Unable to display replay frame',e);}finally{displaying=false;}
 }
 async function toggle(){
 if(playing){playing=false;playBtn.textContent='Play';cancelAnimationFrame(raf);return;}
