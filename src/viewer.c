@@ -740,7 +740,7 @@ static size_t png_encode(const uint8_t *rgba, int w, int h, uint8_t **out) {
     uLongf clen = compressBound(raw_len);
     uint8_t *z = malloc(clen);
     if (!z) { free(raw); return 0; }
-    if (compress2(z, &clen, raw, raw_len, 1) != Z_OK) {
+    if (compress2(z, &clen, raw, raw_len, 6) != Z_OK) {
         free(raw); free(z); return 0;
     }
     free(raw);
