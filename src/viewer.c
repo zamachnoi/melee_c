@@ -313,8 +313,14 @@ static void build_stage_frame(active_t *a) {
            and let the 2D backdrop represent the distant scene. */
         if (bounds[0] < -100.0f || bounds[2] > 100.0f || bounds[3] > 5.0f)
             continue;
+        /* The first two FD groups are the horizontal top surface split into
+           overlapping material passes.  Tilting both into a side-view turns
+           their depth layers into a stack of duplicate rails.  The authored
+           underbody group already contains the visible platform silhouette. */
+        if (bounds[3] - bounds[1] < 1.0f)
+            continue;
         render_pose_tilted(&a->stage->sections[i], NULL, UINT32_MAX, 0, 1,
-                           scale, tx, ty, 0.0f, 0.16f,
+                           scale, tx, ty, 0.0f, 0.0f,
                            a->stage_fb, FB_W, FB_H);
     }
 }
@@ -384,9 +390,10 @@ static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
                 action = render_find_action(anims, "Wait1");
 
             if (model) {
-                render_pose(model, anims, action, f->anim_frame,
-                            f->facing > 0 ? -1 : 1, (float)a->cam.scale,
-                            (float)sx, (float)sy, g_fb, FB_W, FB_H);
+                render_pose_profile(model, anims, action, f->anim_frame,
+                                    f->facing < 0 ? -1 : 1,
+                                    (float)a->cam.scale, (float)sx, (float)sy,
+                                    g_fb, FB_W, FB_H);
                 if (f->action_state >= 178 && f->action_state <= 182 &&
                     f->shield_size > 0 && pass == 0) {
                     double rad = f->shield_size * 0.25 * a->cam.scale;
