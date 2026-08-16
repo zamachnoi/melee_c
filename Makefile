@@ -64,6 +64,27 @@ run: $(BIN)/melee
 viewer: $(BIN)/viewer
 	$(BIN)/viewer
 
+# Start the per-worktree dev server on the next free port and record it in
+# dev-server.env (gitignored) so agents can discover DEV_URL from repo context.
+devserver: $(BIN)/viewer
+	scripts/devserver.sh
+
+# Stop this worktree's dev server (reads .devserver.pid) and clear its context.
+devserver-stop:
+	@pid=$$(cat .devserver.pid 2>/dev/null || true); \
+	if [ -n "$$pid" ] && kill -0 "$$pid" 2>/dev/null; then \
+		kill "$$pid" && echo "stopped dev server (pid $$pid)"; \
+	else \
+		echo "no running dev server for this worktree"; \
+	fi
+	@rm -f .devserver.pid dev-server.env .devserver.log
+
+# Wire the auto-start hook for worktree creation (needs git >= 2.44).
+worktree-hook:
+	git config worktree.guiHook "$$(git rev-parse --git-common-dir)/../scripts/wt-hook.sh"
+	git config worktree.resetHook "$$(git rev-parse --git-common-dir)/../scripts/wt-hook.sh"
+	@echo "worktree auto-start hook configured (git >= 2.44)."
+
 dump: $(BIN)/datdump
 	$(BIN)/datdump --iso=fixtures/game.iso $(DAT)
 

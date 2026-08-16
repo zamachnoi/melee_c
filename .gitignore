@@ -2,3 +2,5 @@ bin/
 build/
 replays/
 cache/
+dev-server.env
+.devserver.*
