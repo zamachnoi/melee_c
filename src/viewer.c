@@ -2002,7 +2002,8 @@ static void handle_root(int cfd, const char *query) {
     size_t len = 0;
     char *body = read_whole_file(path, &len);
     if (body) {
-        send_response(cfd, "text/html; charset=utf-8", body, len);
+        send_response_headers(cfd, 200, "OK", "text/html; charset=utf-8",
+                              "Cache-Control: no-store\r\n", body, len);
         free(body);
     } else if (software) {
         send_response(cfd, "text/html; charset=utf-8", html_doc,
@@ -2040,7 +2041,7 @@ static void handle_web_module(int cfd, const char *path) {
     char *body = read_whole_file(file_path, &len);
     if (!body) { send_error(cfd, 404, "Not Found", "module not found"); return; }
     send_response_headers(cfd, 200, "OK", "text/javascript; charset=utf-8",
-                          "Cache-Control: no-cache\r\n", body, len);
+                          "Cache-Control: no-store\r\n", body, len);
     free(body);
 }
 

@@ -40,7 +40,7 @@ select,button,input{font:12px inherit;color:#dce6f5;background:#171d28;border:1p
     <div id="warningOverlay" hidden></div><pre id="debugOverlay" hidden></pre>
   </div>
   <div class="controls">
-    <select id="replaySelect" aria-label="Replay"></select>
+    <select id="replaySelect" aria-label="Replay"><option disabled>Loading replays…</option></select>
     <select id="cameraMode" aria-label="Camera mode"><option value="melee">Melee camera</option><option value="fit">Fit players</option><option value="follow">Follow fighter</option></select>
     <button id="resetCamera" type="button">Reset camera</button>
     <button id="debugToggle" type="button" aria-pressed="false">Debug</button>
@@ -56,6 +56,18 @@ select,button,input{font:12px inherit;color:#dce6f5;background:#171d28;border:1p
   <div id="diagnostics" class="readout"></div>
   <p class="help">Space play/pause · ←/→ step · drag to pan · wheel to zoom · double-click reset · 1–4 follow player · ` debug · <a href="/?renderer=software">software renderer</a></p>
 </main>
-<script type="module" src="/main.js"></script>
+<script data-cfasync="false">
+fetch('/api/replays').then(function(r){return r.json();}).then(function(list){
+  var sel=document.getElementById('replaySelect');
+  if(!sel||sel.dataset.filled==='1')return;
+  sel.replaceChildren();
+  for(var i=0;i<list.length;i++){
+    var o=document.createElement('option');
+    o.value=list[i].id; o.textContent=list[i].name; sel.append(o);
+  }
+  if(!list.length){var empty=document.createElement('option');empty.disabled=true;empty.textContent='No replays';sel.append(empty);}
+}).catch(function(){});
+</script>
+<script type="module" src="/main.js" data-cfasync="false"></script>
 </body>
 </html>

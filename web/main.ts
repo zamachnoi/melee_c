@@ -100,10 +100,33 @@ export async function bootWebGL2(): Promise<void> {
   const debugOverlay = element<HTMLPreElement>('debugOverlay');
   const debugToggle = element<HTMLButtonElement>('debugToggle');
 
+  const fillReplaySelect = (replays: ReplayListItem[], selectedId?: string): void => {
+    replaySelect.replaceChildren(...replays.map(replay => {
+      const option = document.createElement('option');
+      option.value = replay.id; option.textContent = replay.name; return option;
+    }));
+    if (!replays.length) {
+      const empty = document.createElement('option');
+      empty.disabled = true;
+      empty.textContent = 'No replays';
+      replaySelect.append(empty);
+    }
+    replaySelect.dataset.filled = '1';
+    if (selectedId && replays.some(replay => replay.id === selectedId)) replaySelect.value = selectedId;
+  };
+
+  status.textContent = 'Loading replay list…';
+  const replayResponse = await fetch('/api/replays');
+  if (!replayResponse.ok) throw new Error(`/api/replays: HTTP ${replayResponse.status}`);
+  const replays = await replayResponse.json() as ReplayListItem[];
+  const requestedReplay = new URLSearchParams(location.search).get('replay');
+  const selectedReplay = replays.some(replay => replay.id === requestedReplay) ? requestedReplay! : replays[0]?.id;
+  fillReplaySelect(replays, selectedReplay);
+
   status.textContent = 'Checking WebGL2 capabilities…';
   const renderer = new WebGL2Renderer(canvas, message => { status.textContent = message; });
   renderer.initialize();
-  status.textContent = 'Capability gate passed; loading replay list…';
+  status.textContent = 'Capability gate passed; loading replay…';
 
   const modelCache = new Map<string, ModelAsset>();
   const animationCache = new Map<string, AnimationsAsset>();
@@ -810,14 +833,6 @@ export async function bootWebGL2(): Promise<void> {
     }
   };
 
-  const fillReplaySelect = (replays: ReplayListItem[], selectedId?: string): void => {
-    replaySelect.replaceChildren(...replays.map(replay => {
-      const option = document.createElement('option');
-      option.value = replay.id; option.textContent = replay.name; return option;
-    }));
-    if (selectedId && replays.some(replay => replay.id === selectedId)) replaySelect.value = selectedId;
-  };
-
   const replayFile = element<HTMLInputElement>('replayFile');
   replayFile.addEventListener('change', () => {
     const file = replayFile.files?.[0];
@@ -844,11 +859,6 @@ export async function bootWebGL2(): Promise<void> {
     void loadReplay(replaySelect.value).catch(console.error);
   });
 
-  const replayResponse = await trackedFetch('/api/replays');
-  const replays = await replayResponse.json() as ReplayListItem[];
-  const requestedReplay = new URLSearchParams(location.search).get('replay');
-  const selectedReplay = replays.some(replay => replay.id === requestedReplay) ? requestedReplay! : replays[0]?.id;
-  fillReplaySelect(replays, selectedReplay);
   if (!selectedReplay) {
     sceneLabel.textContent = 'No replay loaded';
     status.textContent = 'No replay is available. Load an .slp file to start.';
