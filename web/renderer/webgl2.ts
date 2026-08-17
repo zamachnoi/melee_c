@@ -103,13 +103,83 @@ void main() {
 
 const MESH_FRAGMENT_SHADER = `#version 300 es
 precision mediump float;
+precision mediump int;
 uniform sampler2D u_texture;
 uniform sampler2D u_detail;
 uniform vec4 u_tint;
 uniform bool u_mirrorMask;
+uniform ivec4 u_tev;          // x active(0/1/2), y colorOp, z alphaOp
+uniform vec4 u_tevBiasScale;  // x colorBias, y alphaBias, z colorScale, w alphaScale
+uniform vec2 u_tevClamp;      // x colorClamp, y alphaClamp
+uniform ivec4 u_tevInColor;   // colorIn selectors
+uniform ivec4 u_tevInAlpha;   // alphaIn selectors
+uniform vec4 u_tevK0;         // KONST constant
+uniform vec4 u_tevK1;         // TEV0 register
+uniform vec4 u_tevK2;         // TEV1 register
+uniform vec4 u_combine;       // x colormap, y alphamap, z blend
+uniform vec4 u_texGen;        // x scaleU (repeatS/texScale.x), y scaleV, z rotCos, w rotSin
+uniform vec2 u_texGenTrans;   // texgen translation
+uniform vec2 u_wrap;          // wrapS/T (0 CLAMP, 1 REPEAT, 2 MIRROR)
 in vec2 v_uv;
 in vec4 v_color;
 out vec4 outColor;
+
+float wrapCoord(float t, float mode) {
+  if (mode > 1.5) {
+    float f = fract(t * 0.5) * 2.0 - 1.0;
+    return abs(f);
+  }
+  if (mode > 0.5) return fract(t);
+  return clamp(t, 0.0, 1.0);
+}
+
+vec3 resolveColorIn(int sel, vec4 tex, vec4 konst, vec4 t0, vec4 t1) {
+  if (sel > 0x7F) {
+    if (sel == 0x85) return t0.rgb;
+    if (sel == 0x86) return vec3(t0.a);
+    if (sel == 0x87) return t1.rgb;
+    if (sel == 0x88) return vec3(t1.a);
+    if (sel == 0x80) return konst.rgb;
+    if (sel == 0x81) return vec3(konst.r);
+    if (sel == 0x82) return vec3(konst.g);
+    if (sel == 0x83) return vec3(konst.b);
+    return vec3(konst.a);
+  }
+  if (sel == 9) return vec3(tex.a);   // TEXA
+  if (sel == 8) return tex.rgb;       // TEXC
+  if (sel == 13) return vec3(0.5);    // HALF
+  if (sel == 12) return vec3(1.0);    // ONE
+  return vec3(0.0);                   // ZERO / registers
+}
+
+float resolveAlphaIn(int sel, vec4 tex, vec4 konst, vec4 t0, vec4 t1) {
+  if (sel == 0x40) return konst.r;
+  if (sel == 0x41) return konst.g;
+  if (sel == 0x42) return konst.b;
+  if (sel == 0x43) return konst.a;
+  if (sel == 0x44) return t0.a;
+  if (sel == 0x45) return t1.a;
+  if (sel == 4) return tex.a;         // TEXA
+  return 0.0;                         // ZERO / APREV / RASA
+}
+
+vec4 tevResult(vec4 tex, vec4 konst, vec4 t0, vec4 t1) {
+  vec3 a = resolveColorIn(u_tevInColor.x, tex, konst, t0, t1);
+  vec3 b = resolveColorIn(u_tevInColor.y, tex, konst, t0, t1);
+  vec3 c = resolveColorIn(u_tevInColor.z, tex, konst, t0, t1);
+  vec3 d = resolveColorIn(u_tevInColor.w, tex, konst, t0, t1);
+  float aa = resolveAlphaIn(u_tevInAlpha.x, tex, konst, t0, t1);
+  float ab = resolveAlphaIn(u_tevInAlpha.y, tex, konst, t0, t1);
+  float ac = resolveAlphaIn(u_tevInAlpha.z, tex, konst, t0, t1);
+  float ad = resolveAlphaIn(u_tevInAlpha.w, tex, konst, t0, t1);
+  vec3 rgb = u_tev.y > 0 ? (a - b) * c + d : (a + b) * c + d;
+  float al = u_tev.z > 0 ? (aa - ab) * ac + ad : (aa + ab) * ac + ad;
+  rgb = (rgb + vec3(u_tevBiasScale.x)) * u_tevBiasScale.z;
+  al = (al + u_tevBiasScale.y) * u_tevBiasScale.w;
+  if (u_tevClamp.x > 0.5) rgb = clamp(rgb, 0.0, 1.0);
+  if (u_tevClamp.y > 0.5) al = clamp(al, 0.0, 1.0);
+  return vec4(rgb, al);
+}
 
 float mirrorCoord(float t) {
   t = abs(t);
@@ -119,14 +189,42 @@ float mirrorCoord(float t) {
 }
 
 void main() {
-  vec4 tex = texture(u_texture, v_uv);
+  float u = v_uv.x - u_texGenTrans.x;
+  float v = v_uv.y - u_texGenTrans.y;
+  vec2 genUv = vec2(
+    (u_texGen.z * u + u_texGen.w * v) * u_texGen.x,
+    (-u_texGen.w * u + u_texGen.z * v) * u_texGen.y);
+  vec2 sampleUv = vec2(wrapCoord(genUv.x, u_wrap.x), wrapCoord(genUv.y, u_wrap.y));
+  vec4 tex = texture(u_texture, sampleUv);
   if (u_mirrorMask) {
     vec2 maskUv = vec2(mirrorCoord(v_uv.x * 2.0), mirrorCoord(v_uv.y * 2.0 - 1.0));
     vec4 mask = texture(u_texture, maskUv);
     vec4 detail = texture(u_detail, v_uv);
     tex = vec4(mix(vec3(0.35), vec3(1.35), detail.r) * mask.a, detail.a * mask.a);
   }
-  outColor = tex * u_tint * v_color;
+  vec4 prev = u_tint * v_color;
+  vec4 src = tex;
+  if (u_tev.x > 0) src = tevResult(tex, u_tevK0, u_tevK1, u_tevK2);
+  float cm = u_combine.x;
+  float am = u_combine.y;
+  vec3 rgb;
+  if (cm > 7.5) rgb = prev.rgb - src.rgb;              // SUB
+  else if (cm > 6.5) rgb = prev.rgb + src.rgb;         // ADD
+  else if (cm > 5.5) rgb = prev.rgb;                   // PASS
+  else if (cm > 4.5) rgb = src.rgb;                    // REPLACE
+  else if (cm > 3.5) rgb = prev.rgb * src.rgb;         // MODULATE
+  else if (cm > 2.5) rgb = (prev.rgb + src.rgb) * u_combine.z; // BLEND
+  else if (cm > 1.5) rgb = (prev.rgb + src.rgb) * src.a; // RGB_MASK
+  else rgb = prev.rgb;                                 // ALPHA_MASK / NONE
+  float al;
+  if (am > 6.5) al = prev.a - src.a;                   // SUB
+  else if (am > 5.5) al = prev.a + src.a;              // ADD
+  else if (am > 4.5) al = prev.a;                      // PASS
+  else if (am > 3.5) al = src.a;                       // REPLACE
+  else if (am > 2.5) al = prev.a * src.a;              // MODULATE
+  else if (am > 1.5) al = (prev.a + src.a) * u_combine.z; // BLEND
+  else al = prev.a;                                    // NONE/ALPHA_MASK
+  outColor = vec4(rgb, al);
   if (outColor.a <= 0.0) discard;
 }`;
 
@@ -337,7 +435,7 @@ function createWebGL2Context(canvas: HTMLCanvasElement): WebGL2RenderingContext 
   }
   const gl = canvas.getContext('webgl2');
   if (gl) return gl;
-  throw new Error('WebGL2 is unavailable. Open /?renderer=software for the C viewer.');
+  throw new Error('WebGL2 is unavailable. Your browser needs WebGL2.');
 }
 
 function configureFloatTexture(gl: WebGL2RenderingContext, texture: WebGLTexture): void {
@@ -377,6 +475,18 @@ interface MeshUniforms {
   boneMatrices: WebGLUniformLocation;
   tint: WebGLUniformLocation;
   mirrorMask: WebGLUniformLocation;
+  tev: WebGLUniformLocation;
+  tevBiasScale: WebGLUniformLocation;
+  tevClamp: WebGLUniformLocation;
+  tevInColor: WebGLUniformLocation;
+  tevInAlpha: WebGLUniformLocation;
+  tevK0: WebGLUniformLocation;
+  tevK1: WebGLUniformLocation;
+  tevK2: WebGLUniformLocation;
+  combine: WebGLUniformLocation;
+  texGen: WebGLUniformLocation;
+  texGenTrans: WebGLUniformLocation;
+  wrap: WebGLUniformLocation;
 }
 
 interface Programs {
@@ -563,7 +673,7 @@ export class WebGL2Renderer implements Renderer {
       : probeFloatInternalFormat(gl, gl.RGBA16F) ? gl.RGBA16F
       : 0;
     if (!boneInternalFormat) {
-      throw new Error('WebGL2 capability gate failed: float bone textures are unavailable. Open /?renderer=software for the C viewer.');
+      throw new Error('WebGL2 capability gate failed: float bone textures are unavailable.');
     }
     return {
       maxTextureSize, maxVertexTextureUnits, maxVertexAttributes,
@@ -606,6 +716,18 @@ export class WebGL2Renderer implements Renderer {
           boneMatrices: uniform(gl, mesh, 'u_boneMatrices'),
           tint: uniform(gl, mesh, 'u_tint'),
           mirrorMask: uniform(gl, mesh, 'u_mirrorMask'),
+          tev: uniform(gl, mesh, 'u_tev'),
+          tevBiasScale: uniform(gl, mesh, 'u_tevBiasScale'),
+          tevClamp: uniform(gl, mesh, 'u_tevClamp'),
+          tevInColor: uniform(gl, mesh, 'u_tevInColor'),
+          tevInAlpha: uniform(gl, mesh, 'u_tevInAlpha'),
+          tevK0: uniform(gl, mesh, 'u_tevK0'),
+          tevK1: uniform(gl, mesh, 'u_tevK1'),
+          tevK2: uniform(gl, mesh, 'u_tevK2'),
+          combine: uniform(gl, mesh, 'u_combine'),
+          texGen: uniform(gl, mesh, 'u_texGen'),
+          texGenTrans: uniform(gl, mesh, 'u_texGenTrans'),
+          wrap: uniform(gl, mesh, 'u_wrap'),
         },
         starPointSize: uniform(gl, stars, 'u_pointSize'),
         overlayUniforms: {
@@ -929,6 +1051,25 @@ export class WebGL2Renderer implements Renderer {
           (170 + ((flags >>> 12) & 0x3f)) / 255,
           (200 + ((flags >>> 20) & 0x3f)) / 255, 1);
       }
+      const tev = group.tev;
+      const bias = [0, 0.5, -0.5, 0];
+      const scale = [1, 2, 4, 0.5];
+      const rot = tev.texRot;
+      const sx = Math.abs(tev.texScale[0]) < 1e-6 ? 1 : tev.texScale[0];
+      const sy = Math.abs(tev.texScale[1]) < 1e-6 ? 1 : tev.texScale[1];
+      gl.uniform4i(u.tev, tev.active, tev.colorOp, tev.alphaOp, 0);
+      gl.uniform4f(u.tevBiasScale, bias[tev.colorBias] ?? 0, bias[tev.alphaBias] ?? 0,
+        scale[tev.colorScale] ?? 1, scale[tev.alphaScale] ?? 1);
+      gl.uniform2f(u.tevClamp, tev.colorClamp ? 1 : 0, tev.alphaClamp ? 1 : 0);
+      gl.uniform4i(u.tevInColor, tev.colorIn[0], tev.colorIn[1], tev.colorIn[2], tev.colorIn[3]);
+      gl.uniform4i(u.tevInAlpha, tev.alphaIn[0], tev.alphaIn[1], tev.alphaIn[2], tev.alphaIn[3]);
+      gl.uniform4f(u.tevK0, tev.constant[0] / 255, tev.constant[1] / 255, tev.constant[2] / 255, tev.constant[3] / 255);
+      gl.uniform4f(u.tevK1, tev.tev0[0] / 255, tev.tev0[1] / 255, tev.tev0[2] / 255, tev.tev0[3] / 255);
+      gl.uniform4f(u.tevK2, tev.tev1[0] / 255, tev.tev1[1] / 255, tev.tev1[2] / 255, tev.tev1[3] / 255);
+      gl.uniform4f(u.combine, tev.colormap, tev.alphamap, tev.blend, 0);
+      gl.uniform4f(u.texGen, tev.repeatS / sx, tev.repeatT / sy, Math.cos(rot), Math.sin(rot));
+      gl.uniform2f(u.texGenTrans, tev.texTrans[0], tev.texTrans[1]);
+      gl.uniform2f(u.wrap, tev.wrapS, tev.wrapT);
       gl.activeTexture(gl.TEXTURE2);
       gl.bindTexture(gl.TEXTURE_2D, extra?.mirrorMask && mesh.textures.length > 1
         ? mesh.textures[1] : this.whiteTexture);

@@ -97,7 +97,7 @@ function characterName(id: number): string {
 
 function stockIconUrl(characterId: number, costume: number): string {
   const slug = CHARACTER_SLUGS[characterId];
-  return slug ? `/assets/v4/icons/${slug}-${costume}.png` : '';
+  return slug ? `/assets/v5/icons/${slug}-${costume}.png` : '';
 }
 
 function formatTimecode(frame: number): string {
@@ -223,7 +223,10 @@ export async function bootWebGL2(): Promise<void> {
     requestCount++;
     if (injectedAssetFailure && url.includes(injectedAssetFailure))
       throw new Error(`${url}: injected asset failure`);
-    const response = await fetch(url, init);
+    // Never let the browser (or an edge cache) serve stale assets: after a
+    // schema bump the same URL must return the current bytes. The server also
+    // sends no-cache + ETag, so this is belt-and-suspenders.
+    const response = await fetch(url, { ...init, cache: 'no-store' });
     if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
     return response;
   };
@@ -265,7 +268,7 @@ export async function bootWebGL2(): Promise<void> {
   const loadEffectCatalog = async (): Promise<EffectCatalog | null> => {
     if (effectCatalog !== undefined) return effectCatalog;
     try {
-      const response = await trackedFetch('/assets/v4/effects.json');
+      const response = await trackedFetch('/assets/v5/effects.json');
       effectCatalog = parseEffectCatalog(await response.json());
       return effectCatalog;
     } catch (error) {
@@ -472,7 +475,7 @@ export async function bootWebGL2(): Promise<void> {
       const layer = classifyStageSection(stageId, mapId, model);
       if (layer === 'skip') continue;
       const action = animations?.actions[mapId];
-      if (stageMapAnimates(stageId, mapId) && action?.joints.length) {
+      if (stageMapAnimates(action)) {
         animated.push({
           model, boneRows: new Float32Array(0), poseVersion: 0, layer, action,
         });
@@ -1003,7 +1006,6 @@ export async function bootWebGL2(): Promise<void> {
         ? `Replay ready with ${assetWarnings.length} visible asset warning${assetWarnings.length === 1 ? '' : 's'}`
         : 'Complete WebGL2 replay ready — all scene state and cameras are local';
       const url = new URL(location.href);
-      if (url.searchParams.get('renderer') === 'software') url.searchParams.delete('renderer');
       url.searchParams.set('replay', id);
       url.searchParams.set('slot', String(selected)); history.replaceState(null, '', url);
       updateDiagnostics();

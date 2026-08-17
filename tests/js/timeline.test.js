@@ -15,7 +15,7 @@ test('browser timeline parser matches the C golden serializer', () => {
   assert.equal(timeline.startFrame, -1);
   assert.equal(timeline.endFrame, 1);
   assert.equal(timeline.stageId, 32);
-  assert.equal(timeline.assetSchema, 4);
+  assert.equal(timeline.assetSchema, 5);
   assert.equal(timeline.liveProtocol, 1);
   assert.deepEqual(timeline.players.map(p => p.name), ['Falco Fixture', 'Fox Fixture']);
   assert.equal(timeline.frame(0, -1).x, 1.5);

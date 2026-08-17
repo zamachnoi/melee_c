@@ -72,27 +72,19 @@ const sceneModule = await fetch(`${baseUrl}/replay/scene.js`);
 assert.equal(sceneModule.status, 200);
 assert.match(sceneModule.headers.get('content-type'), /text\/javascript/);
 
-const [defaultResponse, softwarePage, explicitWebglPage] = await Promise.all([
-  fetch(`${baseUrl}/`),
-  fetch(`${baseUrl}/?renderer=software`).then(response => response.text()),
-  fetch(`${baseUrl}/?renderer=webgl2`).then(response => response.text()),
-]);
+const defaultResponse = await fetch(`${baseUrl}/`);
 assert.match(defaultResponse.headers.get('cache-control'), /no-store/);
 const defaultPage = await defaultResponse.text();
 assert.match(defaultPage, /data-renderer="webgl2"/);
 assert.match(defaultPage, /Melee replay/);
 assert.match(defaultPage, /\/viewer\.js\?v=[0-9a-f]{12}/);
 assert.doesNotMatch(defaultPage, /src="\/main\.js"/);
-assert.match(explicitWebglPage, /data-renderer="webgl2"/);
-assert.match(explicitWebglPage, /\/viewer\.js\?v=[0-9a-f]{12}/);
-assert.match(softwarePage, /Melee 2D Replay/);
-assert.doesNotMatch(softwarePage, /data-renderer="webgl2"/);
 
 const iceClimbersId = secondId;
 const iceManifest = second.manifest;
 const nanaAsset = iceManifest.assets.find(asset => asset.slot === 3);
-assert.equal(nanaAsset.model, '/assets/v4/models/nana-3.model');
-assert.equal(nanaAsset.animations, '/assets/v4/anims/popo-3.anims');
+assert.equal(nanaAsset.model, '/assets/v5/characters/nana/nana-3.model');
+assert.equal(nanaAsset.animations, '/assets/v5/characters/popo/popo-3.anims');
 const iceTimeline = second.timeline;
 assert.equal(iceTimeline.slots[3].active, true);
 assert.equal(iceTimeline.slots[3].presence.reduce((sum, value) => sum + value, 0), 6179);
@@ -104,7 +96,7 @@ const replayList = await (await fetch(`${baseUrl}/api/replays`)).json();
 assert.equal(replayList.find(replay => replay.id === firstId).name, 'vertical.slp');
 assert.equal(replayList.find(replay => replay.id === iceClimbersId).name, 'ICs.slp');
 
-const effectsCatalog = await fetch(`${baseUrl}/assets/v4/effects.json`);
+const effectsCatalog = await fetch(`${baseUrl}/assets/v5/effects.json`);
 assert.equal(effectsCatalog.status, 200);
 assert.match(effectsCatalog.headers.get('content-type'), /application\/json/);
 const catalog = await effectsCatalog.json();
@@ -112,7 +104,7 @@ assert.equal(catalog.schema, 4);
 assert.equal(catalog.aliases.shield, 'ef-co-11.model');
 assert.equal(catalog.aliases.shine, 'ef-fx-0.model');
 assert.equal(catalog.items['54'], 'it-54.model');
-const shineModel = await fetch(`${baseUrl}/assets/v4/models/${catalog.aliases.shine}`);
+const shineModel = await fetch(`${baseUrl}/assets/v5/effects/${catalog.aliases.shine}`);
 assert.equal(shineModel.status, 200);
 assert.equal(shineModel.headers.get('content-type'), 'application/vnd.melee.model');
 

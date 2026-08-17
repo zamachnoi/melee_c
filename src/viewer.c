@@ -1,23 +1,19 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * SLP debug viewer: software-renders replay frames and serves them over HTTP
- * as raw RGBA for the browser. No native windowing / SDL required.
+ * SLP debug viewer: HTTP server for the WebGL2 replay frontend.
  *
  * Endpoints:
- *   GET /                     WebGL2 frontend (default)
- *   GET /?renderer=software   C software-renderer frontend
+ *   GET /                     WebGL2 frontend
  *   GET /api/replays          JSON list with immutable replay ids
  *   POST /api/replays         upload raw .slp, returns immutable replay id
  *   GET /api/replays/{id}/manifest replay-scoped metadata and asset URLs
  *   GET /api/replays/{id}/timeline completed replay state snapshot
- *   GET /assets/v4/...        immutable, allowlisted schema-4 assets
+ *   GET /assets/...        allowlisted, schema-versioned assets (no-cache)
  *
- * Legacy software-renderer endpoints (kept as the migration oracle):
- *   GET /api/set?f=<name>     load <name> as the active replay
- *   POST /api/upload?f=<name> upload an .slp file (raw body) and load it
- *   GET /api/info             JSON about the active replay
- *   GET /api/frame?n=<frame>  binary: [4B BE json_len][json][deflated RGBA]
+ * Assets are versioned by schema in the URL (/assets/v5/...) and served with
+ * ETag revalidation but no `immutable`, so a schema bump always reaches the
+ * browser instead of being stuck in a stale edge/disk cache.
  *
  * Environment:
  *   PORT      HTTP port (default 8080)
@@ -47,27 +43,27 @@
 #include "asset.h"
 #include "parser.h"
 #include "protocol.h"
-#include "render.h"
 #include "sha256.h"
 #include "timeline.h"
 
 #define FB_W 960
 #define FB_H 720
-#define FB_BYTES ((size_t)FB_W * FB_H * 4)
 
 #ifndef ASSET_DIR
 #define ASSET_DIR "cache"
 #endif
+
+/* Immutable asset URL prefix.  Bumping ASSET_SCHEMA_VERSION must bump this
+   too, so the previous schema's files are never reused from any cache.
+   Assets themselves are served with `no-cache` + ETag (see send_immutable). */
+#define ASSET_URL_PREFIX "/assets/v5/"
+#define ASSET_URL_PREFIX_LEN (sizeof(ASSET_URL_PREFIX) - 1)
 
 /* Safari ignores no-store on some cached GETs and 404s; be explicit. */
 #define HTTP_NO_STORE \
     "Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n" \
     "Pragma: no-cache\r\n" \
     "Expires: 0\r\n"
-
-typedef struct {
-    uint8_t r, g, b, a;
-} color_t;
 
 typedef struct {
     double scale;
@@ -77,23 +73,12 @@ typedef struct {
 typedef struct {
     slp_replay_t replay;
     cam_t cam;
-    asset_model_t *models[SLP_SLOT_COUNT];
-    asset_anims_t *anims[SLP_SLOT_COUNT];
-    asset_stage_t *stage;
-    uint8_t *stage_fb;
-    uint8_t *stage_sprite;
-    int stage_sprite_w, stage_sprite_h;
-    double stage_sprite_ppu, stage_sprite_min_x, stage_sprite_max_y;
     cam_t *frame_cams;
     size_t frame_cam_count;
     int32_t start_frame;
     int32_t last_frame;
-    char name[256];
 } active_t;
 
-static active_t g_active;
-static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
-static _Thread_local uint8_t *g_fb;
 static char g_dir[1024] = "./replays";
 static char g_web_dir[1024] = "./web";
 
@@ -105,56 +90,8 @@ static const char *asset_dir(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Pixel helpers                                                       */
-/* ------------------------------------------------------------------ */
-
-static inline void plot(int x, int y, color_t c) {
-    if (x < 0 || y < 0 || x >= FB_W || y >= FB_H) return;
-    uint8_t *p = &g_fb[(y * FB_W + x) * 4];
-    p[0] = (uint8_t)((c.r * c.a + p[0] * (255 - c.a)) / 255);
-    p[1] = (uint8_t)((c.g * c.a + p[1] * (255 - c.a)) / 255);
-    p[2] = (uint8_t)((c.b * c.a + p[2] * (255 - c.a)) / 255);
-    p[3] = 255;
-}
-
-static void fill_rect(int x0, int y0, int x1, int y1, color_t c) {
-    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
-    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-    for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++) plot(x, y, c);
-}
-
-static void fill_circle(int cx, int cy, int rad, color_t c) {
-    int r2 = rad * rad;
-    for (int y = cy - rad; y <= cy + rad; y++)
-        for (int x = cx - rad; x <= cx + rad; x++) {
-            int dx = x - cx, dy = y - cy;
-            if (dx * dx + dy * dy <= r2) plot(x, y, c);
-        }
-}
-
-static void draw_line(int x0, int y0, int x1, int y1, color_t c) {
-    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy;
-    for (;;) {
-        plot(x0, y0, c);
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /* Camera / world mapping                                              */
 /* ------------------------------------------------------------------ */
-
-static void world_to_screen(const cam_t *cam, double wx, double wy, int *sx,
-                            int *sy) {
-    *sx = (int)lround((wx - cam->cx) * cam->scale + FB_W / 2.0);
-    *sy = (int)lround(FB_H / 2.0 - (wy - cam->cy) * cam->scale);
-}
 
 static void compute_camera(slp_replay_t *r, cam_t *cam) {
     /* Final Destination's gameplay camera is intentionally stable.  A
@@ -314,32 +251,6 @@ static void build_gameplay_cameras(active_t *a) {
     }
 }
 
-static cam_t gameplay_camera(const active_t *a, int32_t fn) {
-    int64_t idx = (int64_t)fn - a->start_frame;
-    if (a->frame_cams && idx >= 0 && (size_t)idx < a->frame_cam_count)
-        return a->frame_cams[idx];
-    return gameplay_camera_target(a, fn);
-}
-
-static void free_scene_assets(active_t *a) {
-    for (unsigned i = 0; i < SLP_SLOT_COUNT; i++) {
-        asset_model_free(a->models[i]);
-        asset_anims_free(a->anims[i]);
-        a->models[i] = NULL;
-        a->anims[i] = NULL;
-    }
-    asset_stage_free(a->stage);
-    a->stage = NULL;
-    free(a->stage_fb);
-    a->stage_fb = NULL;
-    free(a->stage_sprite);
-    a->stage_sprite = NULL;
-    a->stage_sprite_w = a->stage_sprite_h = 0;
-    free(a->frame_cams);
-    a->frame_cams = NULL;
-    a->frame_cam_count = 0;
-}
-
 static void character_slug(uint8_t id, char *out, size_t cap) {
     const char *name = slp_character_name(id);
     size_t n = 0;
@@ -354,7 +265,7 @@ static void character_slug(uint8_t id, char *out, size_t cap) {
 
 /* Map Slippi stage id to the extracted stage asset basename (the lowercased
    DAT file name).  The WebGL2 manifest emits this so the browser can fetch
-   /assets/v4/stages/<basename>.stage.  Unknown stages return NULL so callers
+   /assets/vN/stages/<basename>.stage.  Unknown stages return NULL so callers
    degrade gracefully (the frontend warns when a stage asset is missing). */
 static const char *stage_asset_slug(uint16_t stage) {
     switch (stage) {
@@ -400,314 +311,6 @@ static asset_stage_t *load_replay_stage(uint16_t stage) {
     return asset_stage_load(path);
 }
 
-static void load_scene_assets(active_t *a) {
-    const slp_game_start_t *gs = &a->replay.game_start;
-    for (unsigned slot = 0; slot < SLP_SLOT_COUNT; slot++) {
-        unsigned port = slot / 2;
-        slp_slot_t *frames = &a->replay.slots[slot];
-        if (!gs->has_player[port] || !frames->active || !frames->count) continue;
-        const slp_frame_t *sample = NULL;
-        for (size_t i = 0; i < frames->count; i++) {
-            if (frames->frames[i].frame_number != 0 || frames->frames[i].character_id) {
-                sample = &frames->frames[i];
-                break;
-            }
-        }
-        if (!sample) continue;
-        char slug[64], model_path[512], anim_path[512];
-        character_slug(sample->character_id, slug, sizeof slug);
-        const char *anim_slug = sample->character_id == 11 ? "popo" : slug;
-        unsigned costume = gs->costume_index[port];
-        snprintf(model_path, sizeof model_path, "%s/%s-%u.model",
-                 asset_dir(), slug, costume);
-        snprintf(anim_path, sizeof anim_path, "%s/%s-%u.anims",
-                 asset_dir(), anim_slug, costume);
-        a->models[slot] = asset_model_load(model_path);
-        a->anims[slot] = asset_anims_load(anim_path);
-    }
-    a->stage = load_replay_stage(gs->stage_id);
-}
-
-/* Stage half-widths so the ground bar spans roughly the right width. */
-static double stage_half_width(uint16_t stage) {
-    switch (stage) {
-        case 32: return 248;  /* Final Destination */
-        case 31: return 207;  /* Battlefield */
-        case 28: return 220;  /* Dream Land */
-        case 8:  return 173;  /* Yoshi's Story */
-        case 3:  return 226;  /* Pokemon Stadium */
-        default: return 200;
-    }
-}
-
-static void draw_stage(const slp_game_start_t *gs, const cam_t *cam) {
-    double hw = stage_half_width(gs->stage_id);
-    int gx0, gy0, gx1, gy1;
-    world_to_screen(cam, -hw, -6, &gx0, &gy0);
-    world_to_screen(cam, hw, 6, &gx1, &gy1);
-    fill_rect(gx0, gy0, gx1, gy1, (color_t){120, 130, 150, 255});
-
-    color_t faint = {255, 255, 255, 28};
-    int bx0, by0, bx1, by1;
-    world_to_screen(cam, -hw, -130, &bx0, &by0);
-    world_to_screen(cam, -hw, 190, &bx1, &by1);
-    draw_line(bx0, by0, bx0, by1, faint); /* left blast line */
-    world_to_screen(cam, hw, -130, &bx0, &by0);
-    world_to_screen(cam, hw, 190, &bx1, &by1);
-    draw_line(bx0, by0, bx0, by1, faint); /* right blast line */
-    world_to_screen(cam, -hw, -130, &bx0, &by0);
-    world_to_screen(cam, hw, -130, &bx1, &by1);
-    draw_line(bx0, by0, bx1, by1, faint); /* bottom blast line */
-    world_to_screen(cam, -hw, 190, &bx0, &by0);
-    world_to_screen(cam, hw, 190, &bx1, &by1);
-    draw_line(bx0, by0, bx1, by1, faint); /* top blast line */
-
-    if (gs->stage_id == 31) { /* Battlefield side platforms */
-        double plats[2] = {-80, 80};
-        for (int i = 0; i < 2; i++) {
-            int px0, py0, px1, py1;
-            world_to_screen(cam, plats[i] - 28, 45, &px0, &py0);
-            world_to_screen(cam, plats[i] + 28, 48, &px1, &py1);
-            fill_rect(px0, py0, px1, py1, (color_t){140, 150, 170, 255});
-        }
-        int px0, py0, px1, py1;
-        world_to_screen(cam, -30, 90, &px0, &py0);
-        world_to_screen(cam, 30, 93, &px1, &py1);
-        fill_rect(px0, py0, px1, py1, (color_t){140, 150, 170, 255});
-    }
-}
-
-static void build_stage_frame(active_t *a) {
-    free(a->stage_fb);
-    a->stage_fb = malloc(FB_BYTES);
-    if (!a->stage_fb) return;
-
-    /* Space backdrop.  The extracted FD model supplies the platform and its
-       textured scenery; this restrained gradient keeps transparent regions
-       readable without competing with the match. */
-    for (int y = 0; y < FB_H; y++) {
-        float t = (float)y / (float)(FB_H - 1);
-        uint8_t r = (uint8_t)(5 + 19 * t);
-        uint8_t g = (uint8_t)(7 + 12 * t);
-        uint8_t b = (uint8_t)(18 + 28 * t);
-        for (int x = 0; x < FB_W; x++) {
-            uint8_t *p = &a->stage_fb[(y * FB_W + x) * 4];
-            p[0] = r; p[1] = g; p[2] = b; p[3] = 255;
-        }
-    }
-    uint32_t seed = 0x4D454C45u;
-    for (int i = 0; i < 150; i++) {
-        seed = seed * 1664525u + 1013904223u;
-        int x = (int)(seed % FB_W);
-        seed = seed * 1664525u + 1013904223u;
-        int y = (int)(seed % (FB_H * 3 / 4));
-        uint8_t *p = &a->stage_fb[(y * FB_W + x) * 4];
-        uint8_t glow = (uint8_t)(105 + (seed >> 24) / 2);
-        p[0] = glow; p[1] = glow; p[2] = (uint8_t)(glow + (255 - glow) / 2);
-    }
-
-}
-
-static int stage_section_visible(const asset_model_t *section,
-                                 float bounds[4]) {
-    if (render_pose_bounds(section, NULL, UINT32_MAX, 0, bounds) != 0)
-        return 0;
-    /* The remaining sections are camera-facing 3D sky domes surrounding the
-       stage.  Keep playable platform/structure geometry and drop them. */
-    if (bounds[0] < -160.0f || bounds[2] > 160.0f) return 0;
-    if (bounds[2] - bounds[0] > 320.0f) return 0;
-    /* Skip the flat, overlapping top-surface material passes. */
-    return bounds[3] - bounds[1] >= 1.0f;
-}
-
-/* Rasterize the static FD mesh once at a higher world-space resolution.
-   Per-frame camera movement can then resample this sprite instead of skinning
-   and filling thousands of stage triangles sixty times per second. */
-static void build_stage_sprite(active_t *a) {
-    free(a->stage_sprite);
-    a->stage_sprite = NULL;
-    a->stage_sprite_w = a->stage_sprite_h = 0;
-    if (!a->stage) return;
-
-    float minx = INFINITY, miny = INFINITY;
-    float maxx = -INFINITY, maxy = -INFINITY;
-    for (uint32_t i = 0; i < a->stage->section_count; i++) {
-        float b[4];
-        if (!stage_section_visible(&a->stage->sections[i], b)) continue;
-        if (b[0] < minx) minx = b[0];
-        if (b[1] < miny) miny = b[1];
-        if (b[2] > maxx) maxx = b[2];
-        if (b[3] > maxy) maxy = b[3];
-    }
-    if (!isfinite(minx) || !isfinite(miny)) return;
-
-    const double ppu = 12.0;
-    const double pad = 2.0 * a->stage->scale;
-    a->stage_sprite_ppu = ppu;
-    a->stage_sprite_min_x = minx * a->stage->scale - pad;
-    a->stage_sprite_max_y = maxy * a->stage->scale + pad;
-    double world_max_x = maxx * a->stage->scale + pad;
-    double world_min_y = miny * a->stage->scale - pad;
-    a->stage_sprite_w = (int)ceil((world_max_x - a->stage_sprite_min_x) * ppu) + 1;
-    a->stage_sprite_h = (int)ceil((a->stage_sprite_max_y - world_min_y) * ppu) + 1;
-    size_t bytes = (size_t)a->stage_sprite_w * a->stage_sprite_h * 4;
-    a->stage_sprite = calloc(1, bytes);
-    if (!a->stage_sprite) {
-        a->stage_sprite_w = a->stage_sprite_h = 0;
-        return;
-    }
-
-    float scale = (float)(ppu * a->stage->scale);
-    float tx = (float)(-a->stage_sprite_min_x * ppu);
-    float ty = (float)(a->stage_sprite_max_y * ppu);
-    for (uint32_t i = 0; i < a->stage->section_count; i++) {
-        float b[4];
-        if (!stage_section_visible(&a->stage->sections[i], b)) continue;
-        render_pose_tilted(&a->stage->sections[i], NULL, UINT32_MAX, 0, 1,
-                           scale, tx, ty, 0.0f, 0.0f, a->stage_sprite,
-                           a->stage_sprite_w, a->stage_sprite_h);
-    }
-}
-
-static void render_stage_model(const active_t *a, const cam_t *cam,
-                               uint8_t *fb) {
-    if (!a->stage_sprite || !a->stage_sprite_w || !a->stage_sprite_h) return;
-    double max_x = a->stage_sprite_min_x +
-                   (a->stage_sprite_w - 1) / a->stage_sprite_ppu;
-    double min_y = a->stage_sprite_max_y -
-                   (a->stage_sprite_h - 1) / a->stage_sprite_ppu;
-    int x0, y0, x1, y1;
-    world_to_screen(cam, a->stage_sprite_min_x, a->stage_sprite_max_y,
-                    &x0, &y0);
-    world_to_screen(cam, max_x, min_y, &x1, &y1);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 >= FB_W) x1 = FB_W - 1;
-    if (y1 >= FB_H) y1 = FB_H - 1;
-    if (x0 > x1 || y0 > y1) return;
-
-    for (int y = y0; y <= y1; y++) {
-        double wy = cam->cy - ((y + 0.5) - FB_H / 2.0) / cam->scale;
-        int v = (int)((a->stage_sprite_max_y - wy) * a->stage_sprite_ppu);
-        if (v < 0 || v >= a->stage_sprite_h) continue;
-        for (int x = x0; x <= x1; x++) {
-            double wx = ((x + 0.5) - FB_W / 2.0) / cam->scale + cam->cx;
-            int u = (int)((wx - a->stage_sprite_min_x) * a->stage_sprite_ppu);
-            if (u < 0 || u >= a->stage_sprite_w) continue;
-            const uint8_t *src = &a->stage_sprite[
-                ((size_t)v * a->stage_sprite_w + u) * 4];
-            if (!src[3]) continue;
-            uint8_t *dst = &fb[((size_t)y * FB_W + x) * 4];
-            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
-        }
-    }
-}
-
-/* Frame rendering
- * ------------------------------------------------------------------ */
-
-static const color_t port_colors[4] = {
-    {255, 90, 90, 255},  {90, 150, 255, 255},
-    {255, 220, 80, 255}, {90, 255, 150, 255},
-};
-
-/* Renders the full frame: stage (redrawn every frame for moving stages),
-   items, and players. */
-static void render_frame(const active_t *a, int32_t fn, uint8_t *fb) {
-    g_fb = fb;
-    if (a->stage_fb) memcpy(g_fb, a->stage_fb, FB_BYTES);
-    else {
-        for (int i = 0; i < FB_W * FB_H; i++) {
-            g_fb[i * 4] = 20; g_fb[i * 4 + 1] = 22;
-            g_fb[i * 4 + 2] = 32; g_fb[i * 4 + 3] = 255;
-        }
-    }
-
-    const slp_game_start_t *gs = &a->replay.game_start;
-    cam_t cam = gameplay_camera(a, fn);
-    if (a->stage) render_stage_model(a, &cam, g_fb);
-    else draw_stage(gs, &cam);
-
-    const slp_item_list_t *items = slp_items_at(&a->replay, fn);
-    if (items) {
-        for (size_t i = 0; i < items->count; i++) {
-            const slp_item_t *it = &items->items[i];
-            int sx, sy;
-            world_to_screen(&cam, it->x, it->y, &sx, &sy);
-            if (it->type_id == 0x36 || it->type_id == 0x37) {
-                color_t glow = it->type_id == 0x36
-                    ? (color_t){255, 76, 64, 235}
-                    : (color_t){80, 185, 255, 235};
-                int tail = it->x_vel >= 0 ? -14 : 14;
-                draw_line(sx + tail, sy, sx, sy, glow);
-                draw_line(sx + tail / 2, sy - 1, sx, sy - 1,
-                          (color_t){235, 245, 255, 180});
-            } else {
-                fill_circle(sx, sy, 4, (color_t){255, 240, 170, 220});
-            }
-        }
-    }
-
-    for (unsigned port = 0; port < SLP_MAX_PORTS; port++) {
-        if (!gs->has_player[port]) continue;
-        color_t col = port_colors[port];
-        color_t dark = {col.r / 2, col.g / 2, col.b / 2, 255};
-
-        for (int pass = 0; pass < 2; pass++) {
-            const slp_frame_t *f = slp_frame_at(&a->replay, port, pass != 0, fn);
-            if (!f || f->frame_number != fn) continue;
-            int sx, sy;
-            world_to_screen(&cam, f->x, f->y, &sx, &sy);
-
-            unsigned slot = port * 2u + (unsigned)(pass != 0);
-            const asset_model_t *model = a->models[slot];
-            const asset_anims_t *anims = a->anims[slot];
-            uint32_t action = UINT32_MAX;
-            if (anims && f->animation_index < anims->action_count &&
-                anims->actions[f->animation_index].joint_count)
-                action = f->animation_index;
-            else if (anims)
-                action = render_find_action(anims, "Wait1");
-
-            if (model) {
-                render_pose_profile(model, anims, action, f->anim_frame,
-                                    f->facing < 0 ? -1 : 1,
-                                    (float)cam.scale, (float)sx, (float)sy,
-                                    g_fb, FB_W, FB_H);
-                if (f->action_state >= 178 && f->action_state <= 182 &&
-                    f->shield_size > 0 && pass == 0) {
-                    double rad = f->shield_size * 0.25 * cam.scale;
-                    fill_circle(sx, sy, (int)rad,
-                                (color_t){120, 200, 255, 85});
-                }
-                continue;
-            }
-
-            double half_w = 9, half_h = 17;
-            if (pass == 1) { half_w = 7; half_h = 13; }
-            double px = half_w * cam.scale, py = half_h * cam.scale;
-            int rx = (int)px, ry = (int)py;
-
-            /* body */
-            fill_rect(sx - rx, sy - ry, sx + rx, sy + ry, dark);
-            fill_rect(sx - rx + 2, sy - ry + 2, sx + rx - 2, sy + ry - 2, col);
-
-            /* shield */
-            if (f->action_state >= 178 && f->action_state <= 182 &&
-                f->shield_size > 0 && pass == 0) {
-                double rad = f->shield_size * 0.25 * cam.scale;
-                fill_circle(sx, sy, (int)rad,
-                            (color_t){120, 200, 255, 110});
-            }
-
-            /* facing notch */
-            int fx = sx + (f->facing >= 0 ? rx : -rx);
-            fill_rect(fx - 2, sy - ry - 6, fx + 2, sy - ry + 6,
-                      (color_t){255, 255, 255, 255});
-        }
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* JSON helpers                                                        */
 /* ------------------------------------------------------------------ */
@@ -727,41 +330,6 @@ static void json_escape(const char *in, char *out, size_t cap) {
         }
     }
     out[o] = '\0';
-}
-
-static const char *frame_json(const active_t *a, int32_t fn, char *buf,
-                              size_t cap) {
-    size_t o = 0;
-    o += (size_t)snprintf(buf + o, cap - o,
-                          "{\"frame\":%d,\"players\":[", fn);
-
-    const slp_game_start_t *gs = &a->replay.game_start;
-    bool first = true;
-    for (unsigned port = 0; port < SLP_MAX_PORTS; port++) {
-        if (!gs->has_player[port]) continue;
-        for (int pass = 0; pass < 2; pass++) {
-            const slp_frame_t *f = slp_frame_at(&a->replay, port, pass != 0, fn);
-            if (!f || f->frame_number != fn) continue;
-            if (!first) o += (size_t)snprintf(buf + o, cap - o, ",");
-            first = false;
-            char cname[32], name[64];
-            const char *cn = slp_character_name(f->character_id);
-            snprintf(cname, sizeof cname, "%s%s", cn,
-                     pass ? " (Nana)" : "");
-            json_escape(cname, cname, sizeof cname);
-            json_escape(gs->name[port], name, sizeof name);
-            o += (size_t)snprintf(buf + o, cap - o,
-                                  "{\"port\":%u,\"name\":\"%s\",\"char\":\"%s\","
-                                  "\"percent\":%.1f,\"stocks\":%u,"
-                                  "\"state\":\"0x%04X\",\"follower\":%d}",
-                                  port + 1, name, cname, f->percent,
-                                  f->stocks_remaining, f->action_state, pass);
-        }
-    }
-    o += (size_t)snprintf(buf + o, cap - o, "]}");
-    if (o >= cap) o = cap - 1;
-    buf[o] = '\0';
-    return buf;
 }
 
 /* ------------------------------------------------------------------ */
@@ -847,29 +415,6 @@ static void parse_path_query(const char *line, char *path, size_t pcap,
     }
 }
 
-static int query_value(const char *query, const char *key, char *out,
-                       size_t cap) {
-    size_t klen = strlen(key);
-    const char *q = query;
-    while (*q) {
-        const char *eq = strchr(q, '=');
-        const char *amp = strchr(q, '&');
-        if (!eq) break;
-        size_t key_len = (size_t)(eq - q);
-        if (key_len == klen && strncmp(q, key, klen) == 0) {
-            const char *val_end = amp ? amp : q + strlen(q);
-            size_t vlen = (size_t)(val_end - (eq + 1));
-            if (vlen >= cap) vlen = cap - 1;
-            memcpy(out, eq + 1, vlen);
-            out[vlen] = '\0';
-            return 0;
-        }
-        if (!amp) break;
-        q = amp + 1;
-    }
-    return -1;
-}
-
 /* Finds "Name: value" in request headers (case-insensitive name). */
 static int header_value(const char *req, const char *name, char *out,
                         size_t cap) {
@@ -933,33 +478,6 @@ static int parse_replay_path(const char *path, slp_replay_t *replay) {
     slp_error_t e = slp_parse(data, (size_t)sz, replay);
     free(data);
     if (e != SLP_OK) return -1;
-    return 0;
-}
-
-static int load_replay(const char *dir, const char *name) {
-    char path[1400];
-    snprintf(path, sizeof path, "%s/%s", dir, name);
-
-    slp_replay_t replay;
-    if (parse_replay_path(path, &replay) != 0) return -1;
-
-    pthread_rwlock_wrlock(&g_lock);
-    free_scene_assets(&g_active);
-    slp_replay_free(&g_active.replay);
-    g_active.replay = replay;
-    snprintf(g_active.name, sizeof g_active.name, "%s", name);
-    compute_camera(&g_active.replay, &g_active.cam);
-    g_active.start_frame = -SLP_FRAME_BASE;
-    g_active.last_frame = replay.last_frame;
-    if (g_active.last_frame == INT32_MIN)
-        g_active.last_frame =
-            (int32_t)((int64_t)replay.frame_count - SLP_FRAME_BASE - 1);
-    load_scene_assets(&g_active);
-    build_stage_sprite(&g_active);
-    compute_stage_camera(g_active.stage, &g_active.cam);
-    build_gameplay_cameras(&g_active);
-    build_stage_frame(&g_active);
-    pthread_rwlock_unlock(&g_lock);
     return 0;
 }
 
@@ -1052,17 +570,6 @@ static int find_replay_by_id(const char *id, char *path, size_t path_cap,
     return found;
 }
 
-static int sanitize_name(const char *in, char *out, size_t cap) {
-    size_t i = 0;
-    for (; in[i] && i + 1 < cap; i++) {
-        unsigned char c = (unsigned char)in[i];
-        if (!(isalnum(c) || c == '_' || c == '-' || c == '.')) return -1;
-        out[i] = (char)c;
-    }
-    out[i] = '\0';
-    return (i >= 4 && strcmp(out + i - 4, ".slp") == 0) ? 0 : -1;
-}
-
 static int replays_json(char *buf, size_t cap) {
     DIR *d = opendir(g_dir);
     if (!d) return snprintf(buf, cap, "[]");
@@ -1115,362 +622,6 @@ static int replays_json(char *buf, size_t cap) {
 }
 
 /* ------------------------------------------------------------------ */
-/* PNG encoding                                                        */
-/* ------------------------------------------------------------------ */
-
-static void png_chunk(uint8_t *dst, const char *type, const uint8_t *data,
-                      size_t len) {
-    dst[0] = (uint8_t)(len >> 24);
-    dst[1] = (uint8_t)(len >> 16);
-    dst[2] = (uint8_t)(len >> 8);
-    dst[3] = (uint8_t)len;
-    memcpy(dst + 4, type, 4);
-    if (len) memcpy(dst + 8, data, len);
-    uint32_t c = crc32(0L, Z_NULL, 0);
-    c = crc32(c, (const Bytef *)type, 4);
-    c = crc32(c, data, (uInt)len);
-    dst[8 + len] = (uint8_t)(c >> 24);
-    dst[8 + len + 1] = (uint8_t)(c >> 16);
-    dst[8 + len + 2] = (uint8_t)(c >> 8);
-    dst[8 + len + 3] = (uint8_t)c;
-}
-
-/* Encodes an RGBA framebuffer as an 8-bit RGB PNG. Returns size, 0 on
-   error. Caller frees *out. */
-static size_t png_encode(const uint8_t *rgba, int w, int h, uint8_t **out) {
-    size_t row_bytes = (size_t)w * 3;
-    size_t raw_len = (row_bytes + 1) * (size_t)h;
-    uint8_t *raw = malloc(raw_len);
-    if (!raw) return 0;
-    size_t o = 0;
-    for (int y = 0; y < h; y++) {
-        raw[o++] = 0; /* filter: none */
-        for (int x = 0; x < w; x++) {
-            const uint8_t *p = &rgba[(y * w + x) * 4];
-            raw[o++] = p[0];
-            raw[o++] = p[1];
-            raw[o++] = p[2];
-        }
-    }
-    uLongf clen = compressBound(raw_len);
-    uint8_t *z = malloc(clen);
-    if (!z) { free(raw); return 0; }
-    /* Frames are transient playback data; prioritize keeping the producer
-       ahead of 60 fps over archival PNG size. */
-    if (compress2(z, &clen, raw, raw_len, Z_BEST_SPEED) != Z_OK) {
-        free(raw); free(z); return 0;
-    }
-    free(raw);
-
-    uint8_t *png = malloc(8 + 25 + (12 + clen) + 12);
-    if (!png) { free(z); return 0; }
-    size_t p = 0;
-    static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
-    memcpy(png, sig, 8);
-    p = 8;
-
-    uint8_t ihdr[13];
-    ihdr[0] = (uint8_t)(w >> 24); ihdr[1] = (uint8_t)(w >> 16);
-    ihdr[2] = (uint8_t)(w >> 8);  ihdr[3] = (uint8_t)w;
-    ihdr[4] = (uint8_t)(h >> 24); ihdr[5] = (uint8_t)(h >> 16);
-    ihdr[6] = (uint8_t)(h >> 8);  ihdr[7] = (uint8_t)h;
-    ihdr[8] = 8; /* bit depth */
-    ihdr[9] = 2; /* color type: RGB */
-    ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-    png_chunk(png + p, "IHDR", ihdr, 13);
-    p += 25;
-    png_chunk(png + p, "IDAT", z, clen);
-    p += 12 + clen;
-    png_chunk(png + p, "IEND", NULL, 0);
-    p += 12;
-
-    free(z);
-    *out = png;
-    return p;
-}
-
-/* Gameplay frames use deflated RGBA rather than PNG.  The browser can put
-   the resulting ImageData directly on the canvas without its comparatively
-   expensive PNG-to-ImageBitmap path. */
-static size_t rgba_deflate(const uint8_t *rgba, size_t len, uint8_t **out) {
-    uLongf compressed_len = compressBound(len);
-    uint8_t *compressed = malloc(compressed_len);
-    if (!compressed) return 0;
-    if (compress2(compressed, &compressed_len, rgba, len,
-                  Z_BEST_SPEED) != Z_OK) {
-        free(compressed);
-        return 0;
-    }
-    *out = compressed;
-    return (size_t)compressed_len;
-}
-
-/* ------------------------------------------------------------------ */
-/* Request handlers                                                    */
-/* ------------------------------------------------------------------ */
-
-/* Caller holds g_lock for reading so replay/assets cannot change mid-frame. */
-static int build_frame_body_locked(int32_t fn, uint8_t **out, size_t *out_len) {
-    uint8_t *fb = malloc(FB_BYTES);
-    if (!fb) return -1;
-    render_frame(&g_active, fn, fb);
-    char json[16384];
-    frame_json(&g_active, fn, json, sizeof json);
-    uint8_t *pixels;
-    size_t pixels_len = rgba_deflate(fb, FB_BYTES, &pixels);
-    free(fb);
-    if (!pixels_len) return -1;
-    size_t jlen = strlen(json);
-    size_t body_len = 4 + jlen + pixels_len;
-    uint8_t *body = malloc(body_len);
-    if (!body) {
-        free(pixels);
-        return -1;
-    }
-    body[0] = (uint8_t)(jlen >> 24);
-    body[1] = (uint8_t)(jlen >> 16);
-    body[2] = (uint8_t)(jlen >> 8);
-    body[3] = (uint8_t)jlen;
-    memcpy(body + 4, json, jlen);
-    memcpy(body + 4 + jlen, pixels, pixels_len);
-    free(pixels);
-    *out = body;
-    *out_len = body_len;
-    return 0;
-}
-
-static void put_u32be(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
-}
-
-static void handle_frame(int cfd, const char *query) {
-    char nbuf[32];
-    if (query_value(query, "n", nbuf, sizeof nbuf) != 0) {
-        send_response(cfd, "text/plain", "missing n", 8);
-        return;
-    }
-    int32_t fn = (int32_t)strtol(nbuf, NULL, 10);
-    uint8_t *body = NULL;
-    size_t body_len = 0;
-    pthread_rwlock_rdlock(&g_lock);
-    int result = build_frame_body_locked(fn, &body, &body_len);
-    pthread_rwlock_unlock(&g_lock);
-    if (result != 0) {
-        send_response(cfd, "text/plain", "render error", 12);
-        return;
-    }
-    send_response(cfd, "application/octet-stream", body, body_len);
-    free(body);
-}
-
-/* Batch format: u32 count, then repeated i32 frame + u32 body_len + the
-   ordinary /api/frame body.  Batching amortizes reverse-proxy latency while
-   keeping each frame independently seekable and decodable in the browser. */
-static void handle_frames(int cfd, const char *query) {
-    char fbuf[32], cbuf[16] = "30";
-    if (query_value(query, "from", fbuf, sizeof fbuf) != 0) {
-        send_response(cfd, "text/plain", "missing from", 12);
-        return;
-    }
-    query_value(query, "count", cbuf, sizeof cbuf);
-    int32_t first = (int32_t)strtol(fbuf, NULL, 10);
-    int count = atoi(cbuf);
-    if (count < 1) count = 1;
-    if (count > 60) count = 60;
-
-    size_t used = 4, cap = 4 + (size_t)count * 70000;
-    uint8_t *batch = malloc(cap);
-    if (!batch) { send_response(cfd, "text/plain", "oom", 3); return; }
-    int built = 0;
-    pthread_rwlock_rdlock(&g_lock);
-    for (int i = 0; i < count; i++) {
-        uint8_t *body = NULL;
-        size_t body_len = 0;
-        if (build_frame_body_locked(first + i, &body, &body_len) != 0) break;
-        size_t need = used + 8 + body_len;
-        if (need > cap) {
-            size_t next = cap * 2;
-            if (next < need) next = need;
-            uint8_t *grown = realloc(batch, next);
-            if (!grown) { free(body); break; }
-            batch = grown; cap = next;
-        }
-        put_u32be(batch + used, (uint32_t)(first + i));
-        put_u32be(batch + used + 4, (uint32_t)body_len);
-        memcpy(batch + used + 8, body, body_len);
-        used += 8 + body_len;
-        built++;
-        free(body);
-    }
-    pthread_rwlock_unlock(&g_lock);
-    put_u32be(batch, (uint32_t)built);
-    send_response(cfd, "application/octet-stream", batch, used);
-    free(batch);
-}
-
-/* GET /api/pose?char=falco&color=0&action=Wait1&frame=30&facing=1
-   Renders the extracted model (bind pose if action omitted) to a PNG. */
-static void handle_pose(int cfd, const char *query) {
-    char cbuf[64] = "falco", abuf[64] = "", fbuf[32] = "0", xbuf[16] = "1", cidx[16] = "0";
-    query_value(query, "char", cbuf, sizeof cbuf);
-    query_value(query, "action", abuf, sizeof abuf);
-    query_value(query, "frame", fbuf, sizeof fbuf);
-    query_value(query, "facing", xbuf, sizeof xbuf);
-    query_value(query, "color", cidx, sizeof cidx);
-    float frame = (float)atof(fbuf);
-    int facing = atoi(xbuf), color = atoi(cidx);
-
-    char mpath[512], apath[512];
-    snprintf(mpath, sizeof mpath, "%s/%s-%d.model", asset_dir(), cbuf, color);
-    snprintf(apath, sizeof apath, "%s/%s-%d.anims", asset_dir(), cbuf, color);
-
-    asset_model_t *m = asset_model_load(mpath);
-    asset_anims_t *a = asset_anims_load(apath);
-    if (!m) {
-        send_response(cfd, "text/plain", "model not cached; run make cache", 33);
-        return;
-    }
-
-    uint32_t aidx = abuf[0] && a ? render_find_action(a, abuf) : UINT32_MAX;
-    if (abuf[0] && aidx == UINT32_MAX) {
-        asset_model_free(m); if (a) asset_anims_free(a);
-        send_response(cfd, "text/plain", "action not found", 16);
-        return;
-    }
-
-    /* Fit the camera to the transformed pose, not the JOBJ-local vertices. */
-    float bounds[4];
-    if (render_pose_bounds(m, a, aidx, frame, bounds) != 0) {
-        asset_model_free(m); if (a) asset_anims_free(a);
-        send_response(cfd, "text/plain", "empty model", 11);
-        return;
-    }
-    float minx = bounds[0], miny = bounds[1];
-    float maxx = bounds[2], maxy = bounds[3];
-    float w = maxx - minx, h = maxy - miny;
-    if (w < 1e-3f) w = 1e-3f;
-    if (h < 1e-3f) h = 1e-3f;
-    float scale = fminf((FB_W * 0.85f) / w, (FB_H * 0.85f) / h);
-    float cx = (minx + maxx) / 2.0f;
-    if (facing < 0) cx = -cx;
-    float tx = FB_W / 2.0f - cx * scale;
-    float ty = FB_H / 2.0f + (miny + maxy) / 2.0f * scale;
-
-    uint8_t *fb = malloc(FB_BYTES);
-    if (!fb) {
-        asset_model_free(m); if (a) asset_anims_free(a);
-        send_response(cfd, "text/plain", "oom", 3);
-        return;
-    }
-    memset(fb, 40, FB_BYTES);
-    for (int i = 0; i < FB_W * FB_H; i++) {
-        fb[i*4] = 30; fb[i*4+1] = 30; fb[i*4+2] = 40; fb[i*4+3] = 255;
-    }
-    render_pose(m, a, aidx, frame, facing, scale, tx, ty, fb, FB_W, FB_H);
-
-    uint8_t *png;
-    size_t plen = png_encode(fb, FB_W, FB_H, &png);
-    free(fb);
-    if (m) asset_model_free(m);
-    if (a) asset_anims_free(a);
-    if (!plen) { send_response(cfd, "text/plain", "encode error", 12); return; }
-    send_response(cfd, "image/png", png, plen);
-    free(png);
-}
-
-static void handle_info(int cfd) {
-    pthread_rwlock_rdlock(&g_lock);
-    char buf[4096];
-    size_t o = 0;
-    const active_t *a = &g_active;
-    const slp_game_start_t *gs = &a->replay.game_start;
-    o += (size_t)snprintf(buf + o, sizeof buf - o,
-                          "{\"name\":\"%s\",\"w\":%d,\"h\":%d,"
-                          "\"start\":%d,\"last\":%d,\"frames\":%zu,"
-                          "\"stage\":%u,\"stageName\":\"%s\","
-                          "\"players\":[",
-                          a->name, FB_W, FB_H, a->start_frame, a->last_frame,
-                          a->replay.frame_count, gs->stage_id,
-                          slp_stage_name(gs->stage_id));
-    bool first = true;
-    for (unsigned port = 0; port < SLP_MAX_PORTS; port++) {
-        if (!gs->has_player[port]) continue;
-        if (!first) o += (size_t)snprintf(buf + o, sizeof buf - o, ",");
-        first = false;
-        char name[64], cname[32];
-        json_escape(gs->name[port], name, sizeof name);
-        const char *cn =
-            slp_character_name(slp_external_to_internal(gs->external_char_id[port]));
-        snprintf(cname, sizeof cname, "%s", cn);
-        o += (size_t)snprintf(buf + o, sizeof buf - o,
-                              "{\"port\":%u,\"name\":\"%s\",\"char\":\"%s\","
-                              "\"costume\":%u,\"stocks\":%u}",
-                              port + 1, name, cname, gs->costume_index[port],
-                              gs->stock_count[port]);
-    }
-    o += (size_t)snprintf(buf + o, sizeof buf - o, "]}");
-    pthread_rwlock_unlock(&g_lock);
-    send_response(cfd, "application/json", buf, o);
-}
-
-static void handle_set(int cfd, const char *query) {
-    char fname[256];
-    if (query_value(query, "f", fname, sizeof fname) != 0) {
-        send_response(cfd, "text/plain", "missing f", 9);
-        return;
-    }
-    if (load_replay(g_dir, fname) != 0) {
-        send_response(cfd, "text/plain", "cannot load", 11);
-        return;
-    }
-    handle_info(cfd);
-}
-
-static void handle_upload(int cfd, const char *query, size_t content_len,
-                          const char *initial, size_t initial_len) {
-    char fname[256];
-    if (query_value(query, "f", fname, sizeof fname) != 0) {
-        send_response(cfd, "text/plain", "missing f", 9);
-        return;
-    }
-    char clean[256];
-    if (sanitize_name(fname, clean, sizeof clean) != 0) {
-        send_response(cfd, "text/plain", "bad name", 8);
-        return;
-    }
-    char *body = malloc(content_len ? content_len : 1);
-    if (!body) {
-        send_response(cfd, "text/plain", "oom", 3);
-        return;
-    }
-    if (initial_len > content_len) initial_len = content_len;
-    if (initial_len) memcpy(body, initial, initial_len);
-    if (read_body(cfd, body + initial_len, content_len - initial_len) != 0) {
-        free(body);
-        send_response(cfd, "text/plain", "bad body", 8);
-        return;
-    }
-
-    char path[1400];
-    snprintf(path, sizeof path, "%s/%s", g_dir, clean);
-    FILE *out = fopen(path, "wb");
-    if (!out) {
-        free(body);
-        send_response(cfd, "text/plain", "cannot write", 12);
-        return;
-    }
-    fwrite(body, 1, content_len, out);
-    fclose(out);
-    free(body);
-
-    if (load_replay(g_dir, clean) != 0) {
-        send_response(cfd, "text/plain", "invalid slp", 11);
-        return;
-    }
-    handle_info(cfd);
-}
-
 /* ------------------------------------------------------------------ */
 /* Stateless replay and immutable asset API                            */
 /* ------------------------------------------------------------------ */
@@ -1501,14 +652,14 @@ static timeline_camera_t *make_timeline_cameras(const slp_replay_t *r,
     temp.start_frame = start;
     temp.last_frame = end;
     compute_camera(&temp.replay, &temp.cam);
-    temp.stage = load_replay_stage(r->game_start.stage_id);
-    if (temp.stage)
-        compute_stage_camera(temp.stage, &temp.cam);
+    asset_stage_t *stage = load_replay_stage(r->game_start.stage_id);
+    if (stage)
+        compute_stage_camera(stage, &temp.cam);
     build_gameplay_cameras(&temp);
     timeline_camera_t *samples = malloc(count * sizeof(*samples));
     if (!samples) {
         free(temp.frame_cams);
-        asset_stage_free(temp.stage);
+        asset_stage_free(stage);
         return NULL;
     }
     for (size_t i = 0; i < count; i++) {
@@ -1519,7 +670,7 @@ static timeline_camera_t *make_timeline_cameras(const slp_replay_t *r,
         samples[i].zoom = (float)cam.scale;
     }
     free(temp.frame_cams);
-    asset_stage_free(temp.stage);
+    asset_stage_free(stage);
     *count_out = count;
     return samples;
 }
@@ -1530,11 +681,17 @@ static int request_etag_matches(const char *req, const char *etag) {
            strcmp(value, etag) == 0;
 }
 
+/* Serves a schema-versioned asset with ETag revalidation but WITHOUT the
+   `immutable` directive.  `immutable` made browsers never re-fetch for a year,
+   so after a schema bump they kept serving stale schema-4 bytes even across
+   hard refreshes.  `no-cache` forces the browser to revalidate via If-None-Match
+   on every load: the server answers 304 when the bytes are unchanged and 200
+   with the current bytes when the schema/cache changed. */
 static void send_immutable(int cfd, const char *req, const char *ctype,
                            const char *etag, const void *body, size_t len) {
     char headers[512];
     snprintf(headers, sizeof headers,
-             "Cache-Control: public, max-age=31536000, immutable\r\n"
+             "Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n"
              "ETag: %s\r\n", etag);
     if (request_etag_matches(req, etag)) {
         send_response_headers(cfd, 304, "Not Modified", ctype, headers,
@@ -1589,16 +746,16 @@ static void handle_replay_manifest(int cfd, const char *req, const char *id) {
         const char *anim_slug = sample->character_id == 11 ? "popo" : slug;
         unsigned costume = replay.game_start.costume_index[slot / 2];
         o += (size_t)snprintf(json + o, sizeof json - o,
-            "%s{\"slot\":%u,\"model\":\"/assets/v4/models/%s-%u.model\","
-            "\"animations\":\"/assets/v4/anims/%s-%u.anims\"}",
-            first ? "" : ",", slot, slug, costume, anim_slug, costume);
+            "%s{\"slot\":%u,\"model\":\"" ASSET_URL_PREFIX "characters/%s/%s-%u.model\","
+            "\"animations\":\"" ASSET_URL_PREFIX "characters/%s/%s-%u.anims\"}",
+            first ? "" : ",", slot, slug, slug, costume, anim_slug, anim_slug, costume);
         first = false;
     }
     const char *stage_slug = stage_asset_slug(replay.game_start.stage_id);
     if (stage_slug)
         o += (size_t)snprintf(json + o, sizeof json - o,
-                             "%s{\"stage\":\"/assets/v4/stages/%s.stage\","
-                             "\"animations\":\"/assets/v4/anims/%s.anims?s=1\"}",
+                             "%s{\"stage\":\"" ASSET_URL_PREFIX "stages/%s.stage\","
+                             "\"animations\":\"" ASSET_URL_PREFIX "stages/%s.anims?s=1\"}",
                              first ? "" : ",", stage_slug, stage_slug);
     if (replay.game_start.stage_id == 3) {
         static const struct { const char *slug; int type; } variants[] = {
@@ -1610,7 +767,7 @@ static void handle_replay_manifest(int cfd, const char *req, const char *id) {
                      asset_dir(), variants[i].slug);
             if (access(stage_path, R_OK) != 0) continue;
             o += (size_t)snprintf(json + o, sizeof json - o,
-                "%s{\"stage\":\"/assets/v4/stages/%s.stage\",\"stadiumType\":%d}",
+                "%s{\"stage\":\"" ASSET_URL_PREFIX "stages/%s.stage\",\"stadiumType\":%d}",
                 o && json[o - 1] != '[' ? "," : "",
                 variants[i].slug, variants[i].type);
         }
@@ -1655,52 +812,6 @@ static void handle_replay_timeline(int cfd, const char *req, const char *id) {
     send_immutable(cfd, req, "application/vnd.melee.timeline", etag,
                    blob.data, blob.len);
     timeline_blob_free(&blob);
-}
-
-static void handle_replay_reference(int cfd, const char *id,
-                                    const char *query) {
-    char nbuf[32];
-    if (query_value(query, "n", nbuf, sizeof nbuf) != 0) {
-        send_error(cfd, 400, "Bad Request", "missing frame n"); return;
-    }
-    char path[1400], name[256];
-    if (find_replay_by_id(id, path, sizeof path, name, sizeof name) != 0) {
-        send_error(cfd, 404, "Not Found", "unknown replay id"); return;
-    }
-    active_t reference;
-    memset(&reference, 0, sizeof reference);
-    if (parse_replay_path(path, &reference.replay) != 0) {
-        send_error(cfd, 422, "Unprocessable Content", "invalid replay"); return;
-    }
-    snprintf(reference.name, sizeof reference.name, "%s", name);
-    reference.start_frame = -SLP_FRAME_BASE;
-    reference.last_frame = replay_end_frame(&reference.replay);
-    int32_t frame = (int32_t)strtol(nbuf, NULL, 10);
-    if (frame < reference.start_frame || frame > reference.last_frame) {
-        slp_replay_free(&reference.replay);
-        send_error(cfd, 400, "Bad Request", "frame outside replay"); return;
-    }
-    compute_camera(&reference.replay, &reference.cam);
-    load_scene_assets(&reference);
-    build_stage_sprite(&reference);
-    compute_stage_camera(reference.stage, &reference.cam);
-    build_gameplay_cameras(&reference);
-    build_stage_frame(&reference);
-    uint8_t *rgba = malloc(FB_BYTES), *png = NULL;
-    size_t png_len = 0;
-    if (rgba) {
-        render_frame(&reference, frame, rgba);
-        png_len = png_encode(rgba, FB_W, FB_H, &png);
-    }
-    free(rgba);
-    free_scene_assets(&reference);
-    slp_replay_free(&reference.replay);
-    if (!png_len) {
-        send_error(cfd, 500, "Internal Server Error", "reference render failed"); return;
-    }
-    send_response_headers(cfd, 200, "OK", "image/png",
-                          "Cache-Control: no-cache\r\n", png, png_len);
-    free(png);
 }
 
 static void handle_create_replay(int cfd, size_t content_len,
@@ -1777,11 +888,11 @@ static int safe_asset_name(const char *name) {
 }
 
 static void handle_asset(int cfd, const char *req, const char *path) {
-    static const char prefix[] = "/assets/v4/";
+    static const char prefix[] = ASSET_URL_PREFIX;
     const char *relative = path + sizeof(prefix) - 1;
     if (strcmp(relative, "effects.json") == 0) {
         char file_path[1400];
-        snprintf(file_path, sizeof file_path, "%s/effects.json", asset_dir());
+        snprintf(file_path, sizeof file_path, "%s/v5/effects.json", asset_dir());
         size_t len = 0; char *body = read_whole_file(file_path, &len);
         if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
         if (len < 16 || body[0] != '{') {
@@ -1796,16 +907,65 @@ static void handle_asset(int cfd, const char *req, const char *path) {
         free(body);
         return;
     }
-    const char *name = NULL, *ctype = NULL, *suffix = NULL;
+    /* relative is one of:
+         characters/<char>/<name>
+         stages/<name>
+         effects/<name>
+         icons/<name>           (served from top-level cache/icons)
+       Build the on-disk subdirectory from the first path component, then
+       validate the trailing basename against the allowlist. */
+    const char *slash = strchr(relative, '/');
+    if (!slash) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+    const char *name = slash + 1;
+    const char *ctype = NULL, *suffix = NULL;
     int png_icon = 0;
-    if (strncmp(relative, "models/", 7) == 0) {
-        name = relative + 7; suffix = ".model"; ctype = "application/vnd.melee.model";
-    } else if (strncmp(relative, "anims/", 6) == 0) {
-        name = relative + 6; suffix = ".anims"; ctype = "application/vnd.melee.animations";
-    } else if (strncmp(relative, "stages/", 7) == 0) {
-        name = relative + 7; suffix = ".stage"; ctype = "application/vnd.melee.stage";
+    if (strncmp(relative, "characters/", 11) == 0) {
+        /* <char> folder plus the file; character name is a second component. */
+        const char *cslash = strchr(name, '/');
+        if (!cslash) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+        name = cslash + 1;
+        if (strchr(name, '/')) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+        char sub[512];
+        size_t clen = (size_t)(cslash - (slash + 1));
+        if (clen == 0 || clen >= sizeof sub) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+        memcpy(sub, slash + 1, clen); sub[clen] = '\0';
+        if (!safe_asset_name(sub)) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+        char file_path[1400];
+        size_t len = 0;
+        if (strstr(name, ".model")) { suffix = ".model"; ctype = "application/vnd.melee.model";
+            snprintf(file_path, sizeof file_path, "%s/v5/characters/%s/%s", asset_dir(), sub, name); }
+        else if (strstr(name, ".anims")) { suffix = ".anims"; ctype = "application/vnd.melee.animations";
+            snprintf(file_path, sizeof file_path, "%s/v5/characters/%s/%s", asset_dir(), sub, name); }
+        else { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+        if (!safe_asset_name(name) || strlen(name) <= strlen(suffix) ||
+            strcmp(name + strlen(name) - strlen(suffix), suffix) != 0) {
+            send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return;
+        }
+        char *body = read_whole_file(file_path, &len);
+        if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
+        if (len < 8 || (uint8_t)body[0] != 'M' || (uint8_t)body[1] != 'D' ||
+            (uint8_t)body[2] != 'L' || body[3] != 0 ||
+            (uint8_t)body[4] != 0 || (uint8_t)body[5] != 0 ||
+            (uint8_t)body[6] != 0 || (uint8_t)body[7] != ASSET_SCHEMA_VERSION) {
+            free(body); send_error(cfd, 422, "Unprocessable Content", "invalid asset header"); return;
+        }
+        uint8_t digest[32]; char hex[65], etag[72];
+        sha256_bytes(body, len, digest); sha256_hex(digest, hex);
+        snprintf(etag, sizeof etag, "\"%.64s\"", hex);
+        send_immutable(cfd, req, ctype, etag, body, len);
+        free(body);
+        return;
+    }
+    if (strchr(name, '/')) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
+    if (strncmp(relative, "stages/", 7) == 0) {
+        suffix = strstr(name, ".stage") ? ".stage" : ".anims";
+        ctype = strstr(name, ".stage") ? "application/vnd.melee.stage" : "application/vnd.melee.animations";
+    } else if (strncmp(relative, "effects/", 8) == 0) {
+        suffix = ".model"; ctype = "application/vnd.melee.model";
     } else if (strncmp(relative, "icons/", 6) == 0) {
-        name = relative + 6; suffix = ".png"; ctype = "image/png"; png_icon = 1;
+        suffix = ".png"; ctype = "image/png"; png_icon = 1;
+    } else {
+        send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return;
     }
     size_t name_len = name ? strlen(name) : 0, suffix_len = suffix ? strlen(suffix) : 0;
     if (!name || !safe_asset_name(name) || name_len <= suffix_len ||
@@ -1815,8 +975,10 @@ static void handle_asset(int cfd, const char *req, const char *path) {
     char file_path[1400];
     if (png_icon)
         snprintf(file_path, sizeof file_path, "%s/icons/%s", asset_dir(), name);
+    else if (strncmp(relative, "stages/", 7) == 0)
+        snprintf(file_path, sizeof file_path, "%s/v5/stages/%s", asset_dir(), name);
     else
-        snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
+        snprintf(file_path, sizeof file_path, "%s/v5/effects/%s", asset_dir(), name);
     size_t len = 0; char *body = read_whole_file(file_path, &len);
     if (!body && png_icon) {
         snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
@@ -1844,171 +1006,6 @@ static void handle_asset(int cfd, const char *req, const char *path) {
 /* ------------------------------------------------------------------ */
 /* Frontend                                                            */
 /* ------------------------------------------------------------------ */
-
-static const char *html_doc =
-    "<!doctype html><html><head><meta charset=utf-8>"
-    "<title>Melee 2D Replay</title><style>"
-    "body{background:#15171c;color:#ddd;font-family:ui-monospace,monospace;"
-    "margin:0;padding:12px;text-align:center}"
-    "h1{font-size:16px;font-weight:600;margin:0 0 8px;color:#9ab}"
-    "#wrap{display:inline-block;position:relative}"
-    "canvas{background:#000;border:1px solid #333;border-radius:4px;"
-    "width:960px;height:auto;max-width:100%}"
-    "#hud{position:absolute;left:8px;top:8px;text-align:left;font-size:12px;"
-    "color:#fff;text-shadow:1px 1px 2px #000;pointer-events:none;line-height:1.4}"
-    "#hud b{display:inline-block;width:10px;height:10px;border-radius:2px;"
-    "margin-right:5px;vertical-align:-1px}"
-    "#bar{display:flex;gap:8px;align-items:center;justify-content:center;"
-    "margin:10px auto;max-width:980px;flex-wrap:wrap}"
-    "select,input[type=file],button{background:#24272e;color:#ddd;border:1px "
-    "solid #333;border-radius:4px;padding:5px 8px;font:inherit;font-size:13px}"
-    "input[type=range]{flex:1;min-width:200px}"
-    "#frameLabel{font-size:13px;min-width:180px;text-align:left}"
-    "#help{color:#666;font-size:11px;margin-top:6px}"
-    "</style></head><body>"
-    "<h1>Melee 2D Replay</h1>"
-    "<div id=wrap><canvas id=cv width=960 height=720></canvas>"
-    "<div id=hud></div></div>"
-    "<div id=bar>"
-    "<select id=sel></select>"
-    "<button id=playBtn>Play</button>"
-    "<input type=range id=slider min=0 max=1 value=0>"
-    "<span id=frameLabel></span>"
-    "<label>Load replay: <input type=file id=file accept=.slp></label>"
-    "</div>"
-    "<div id=help>Space play/pause &middot; &larr;/&rarr; step &middot; "
-    "Home/End first/last &middot; drag canvas to scrub</div>"
-    "<script>"
-    "const cv=document.getElementById('cv'),ctx=cv.getContext('2d');"
-    "const sel=document.getElementById('sel'),sl=document.getElementById('slider');"
-    "const playBtn=document.getElementById('playBtn'),file=document.getElementById('file');"
-    "const fl=document.getElementById('frameLabel'),hud=document.getElementById('hud');"
-    "let info=null,playing=false,cur=0,raf=0,lastT=0,acc=0,seq=0,displaying=false;"
-    "let rendered=0,fps=0,fpsT=performance.now();"
-    "const pngCache=new Map(),pending=new Map();"
-    "let nextFill=0,inflight=0;"
-    "const MAX_BATCH=2,BATCH=30,PREFETCH=120,START_BUFFER=30,STEP=1000/60;"
-    "const W=960,H=720;"
-    "const COL=['hsl(0 90% 60%)','hsl(240 85% 60%)','hsl(60 90% 60%)','hsl(120 85% 55%)'];"
-    "async function fetchReplays(){"
-    "const r=await fetch('/api/replays');const list=await r.json();"
-    "const replayFile=r=>r.file||r.name;"
-    "sel.replaceChildren(...list.map(r=>{const o=document.createElement('option');"
-    "o.value=replayFile(r);o.textContent=r.name;return o;}));"
-    "if(!list.length)return;"
-    "if(!info||!list.some(r=>replayFile(r)===info.name)){await load(replayFile(list[0]));}"
-    "}"
-    "function requestFrame(n){"
-    "if(pngCache.has(n))return Promise.resolve(pngCache.get(n));"
-    "if(pending.has(n))return pending.get(n);"
-    "const p=fetch('/api/frame?n='+n).then(r=>r.arrayBuffer()).then(ab=>{"
-    "pngCache.set(n,ab);"
-    "if(pngCache.size>2500){pngCache.delete(pngCache.keys().next().value);}"
-    "pending.delete(n);return ab;"
-    "}).catch(e=>{pending.delete(n);throw e;});"
-    "pending.set(n,p);return p;"
-    "}"
-    "function cacheFrame(n,ab){"
-    "pngCache.set(n,ab);"
-    "while(pngCache.size>2500)pngCache.delete(pngCache.keys().next().value);"
-    "}"
-    "async function requestBatch(from,count){"
-    "const ab=await fetch('/api/frames?from='+from+'&count='+count).then(r=>r.arrayBuffer());"
-    "const dv=new DataView(ab);let off=4,total=dv.getUint32(0,false);"
-    "for(let i=0;i<total;i++){"
-    "const n=dv.getInt32(off,false),len=dv.getUint32(off+4,false);off+=8;"
-    "cacheFrame(n,ab.slice(off,off+len));off+=len;"
-    "}"
-    "}"
-    "function fillCache(){"
-    "if(!info)return;"
-    "const hi=Math.min(info.last,cur+PREFETCH);"
-    "if(cur>nextFill)nextFill=cur+1;"
-    "while(inflight<MAX_BATCH&&nextFill<=hi){"
-    "while(nextFill<=hi&&pngCache.has(nextFill))nextFill++;"
-    "if(nextFill>hi)break;"
-    "const from=nextFill,count=Math.min(BATCH,hi-from+1);nextFill+=count;"
-    "inflight++;"
-    "requestBatch(from,count).finally(()=>{inflight--;fillCache();});"
-    "}"
-    "}"
-    "async function load(name){"
-    "const r=await fetch('/api/set?f='+encodeURIComponent(name));info=await r.json();"
-    "pngCache.clear();pending.clear();inflight=0;displaying=false;seq++;"
-    "sl.min=info.start;sl.max=info.last;cur=info.start;sl.value=cur;"
-    "nextFill=cur+1;"
-    "document.title='Melee 2D Replay - '+info.name;"
-    "await show(cur);"
-    "}"
-    "async function show(n){"
-    "if(displaying)return;displaying=true;"
-    "const my=++seq;"
-    "try{"
-    "const ab=await requestFrame(n);"
-    "if(my!==seq)return;"
-    "const dv=new DataView(ab);"
-    "const jlen=dv.getUint32(0,false);"
-    "const st=JSON.parse(new TextDecoder().decode(new Uint8Array(ab,4,jlen)));"
-    "const packed=new Blob([ab.slice(4+jlen)]).stream();"
-    "const raw=await new Response(packed.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();"
-    "if(my!==seq)return;"
-    "ctx.putImageData(new ImageData(new Uint8ClampedArray(raw),W,H),0,0);"
-    "rendered++;const now=performance.now();"
-    "if(now-fpsT>=1000){fps=rendered*1000/(now-fpsT);rendered=0;fpsT=now;}"
-    "fl.textContent=st.frame+' / '+info.last+(playing?' · '+fps.toFixed(0)+' fps':'');"
-    "hud.innerHTML=st.players.map(p=>{"
-    "const c=COL[(p.port-1)%4];"
-    "return`<b style=\"background:${c}\"></b>`+"
-    "`${p.name||('P'+p.port)} ${p.char} ${p.percent.toFixed(1)}% x${p.stocks}`+"
-    "`<span style=\"color:#888\"> ${p.state}</span><br>`;"
-    "}).join('');"
-    "fillCache();"
-    "}catch(e){}finally{displaying=false;}"
-    "}"
-    "async function toggle(){"
-    "if(playing){playing=false;playBtn.textContent='Play';cancelAnimationFrame(raf);return;}"
-    "playBtn.disabled=true;playBtn.textContent='Buffering…';fillCache();"
-    "const target=Math.min(info.last,cur+START_BUFFER);let tries=0;"
-    "while(!pngCache.has(target)&&tries++<100)await new Promise(r=>setTimeout(r,20));"
-    "playBtn.disabled=false;playing=true;playBtn.textContent='Pause';acc=0;"
-    "lastT=performance.now();raf=requestAnimationFrame(loop);"
-    "}"
-    "function loop(t){"
-    "if(!playing)return;"
-    "acc+=t-lastT;lastT=t;"
-    "while(acc>=STEP&&playing){"
-    "acc-=STEP;"
-    "if(cur<info.last){cur++;sl.value=cur;show(cur);}"
-    "else{toggle();return;}"
-    "}"
-    "raf=requestAnimationFrame(loop);"
-    "}"
-    "playBtn.onclick=toggle;"
-    "sl.oninput=()=>{cur=+sl.value;show(cur);};"
-    "sel.onchange=()=>load(sel.value);"
-    "file.onchange=async()=>{const f=file.files[0];"
-    "const r=await fetch('/api/upload?f='+encodeURIComponent(f.name),"
-    "{method:'POST',body:f});"
-    "if(r.ok){info=await r.json();await fetchReplays();sel.value=info.name;"
-    "document.title='SLP Debug Viewer - '+info.name;sl.min=info.start;"
-    "sl.max=info.last;cur=info.start;sl.value=cur;show(cur);}else{alert('upload failed');}"
-    "file.value='';};"
-    "addEventListener('keydown',e=>{"
-    "if(e.code==='Space'){e.preventDefault();toggle();}"
-    "else if(e.code==='ArrowRight'){cur=Math.min(cur+1,info.last);sl.value=cur;show(cur);}"
-    "else if(e.code==='ArrowLeft'){cur=Math.max(cur-1,info.start);sl.value=cur;show(cur);}"
-    "else if(e.code==='Home'){cur=info.start;sl.value=cur;show(cur);}"
-    "else if(e.code==='End'){cur=info.last;sl.value=cur;show(cur);}});"
-    "let scrubbing=false;"
-    "cv.addEventListener('mousedown',e=>{scrubbing=true;scrub(e);});"
-    "addEventListener('mousemove',e=>{if(scrubbing)scrub(e);});"
-    "addEventListener('mouseup',()=>scrubbing=false);"
-    "function scrub(e){const r=cv.getBoundingClientRect();"
-    "const frac=(e.clientX-r.left)/r.width;"
-    "cur=Math.round(info.start+frac*(info.last-info.start));"
-    "sl.value=cur;show(cur);}"
-    "fetchReplays();"
-    "</script></body></html>";
 
 /* Reads an entire file into a malloc'd buffer. Returns NULL on error. */
 static char *read_whole_file(const char *path, size_t *len) {
@@ -2061,29 +1058,19 @@ static char *with_viewer_script_hash(char *html, size_t *len) {
     return out;
 }
 
-/* Serves WebGL2 by default. The software viewer remains at ?renderer=software
-   as the migration oracle. ?renderer=webgl2 is still accepted as an alias.
-   This lets you edit the frontend and just refresh -- no rebuild needed. */
-static void handle_root(int cfd, const char *query) {
+/* Serves the WebGL2 frontend.  This lets you edit the frontend and just
+   refresh -- no rebuild needed. */
+static void handle_root(int cfd) {
     char path[1400];
-    char renderer[32] = "";
-    query_value(query, "renderer", renderer, sizeof renderer);
-    int software = strcmp(renderer, "software") == 0;
-    snprintf(path, sizeof path, "%s/%s", g_web_dir,
-             software ? "index.html" : "webgl.html");
+    snprintf(path, sizeof path, "%s/webgl.html", g_web_dir);
     size_t len = 0;
     char *body = read_whole_file(path, &len);
     if (body) {
-        if (!software) {
-            char *stamped = with_viewer_script_hash(body, &len);
-            if (stamped != body) { free(body); body = stamped; }
-        }
+        char *stamped = with_viewer_script_hash(body, &len);
+        if (stamped != body) { free(body); body = stamped; }
         send_response_headers(cfd, 200, "OK", "text/html; charset=utf-8",
                               HTTP_NO_STORE, body, len);
         free(body);
-    } else if (software) {
-        send_response(cfd, "text/html; charset=utf-8", html_doc,
-                       strlen(html_doc));
     } else {
         send_error(cfd, 500, "Internal Server Error",
                    "web/webgl.html is missing");
@@ -2126,8 +1113,7 @@ static void handle_web_module(int cfd, const char *path) {
     free(body);
 }
 
-static void handle_scoped_replay(int cfd, const char *req, const char *path,
-                                 const char *query) {
+static void handle_scoped_replay(int cfd, const char *req, const char *path) {
     const char *tail = path + strlen("/api/replays/");
     const char *slash = strchr(tail, '/');
     if (!slash || (size_t)(slash - tail) != 64) {
@@ -2139,7 +1125,6 @@ static void handle_scoped_replay(int cfd, const char *req, const char *path,
     }
     if (strcmp(slash, "/manifest") == 0) handle_replay_manifest(cfd, req, id);
     else if (strcmp(slash, "/timeline") == 0) handle_replay_timeline(cfd, req, id);
-    else if (strcmp(slash, "/reference") == 0) handle_replay_reference(cfd, id, query);
     else send_error(cfd, 404, "Not Found", "unknown replay resource");
 }
 
@@ -2155,11 +1140,9 @@ static void *conn_thread(void *arg) {
         char path[256] = "", query[256] = "";
         parse_path_query(req, path, sizeof path, query, sizeof query);
         if (strcmp(path, "/") == 0)
-            handle_root(cfd, query);
+            handle_root(cfd);
         else if (web_module_path(path))
             handle_web_module(cfd, path);
-        else if (strcmp(path, "/api/info") == 0)
-            handle_info(cfd);
         else if (strcmp(path, "/api/replays") == 0) {
             if (strncmp(req, "POST ", 5) == 0) {
                 char cl[32] = "0";
@@ -2178,26 +1161,10 @@ static void *conn_thread(void *arg) {
                 send_response(cfd, "application/json", buf, (size_t)len);
             }
         } else if (strncmp(path, "/api/replays/", 13) == 0)
-            handle_scoped_replay(cfd, req, path, query);
-        else if (strncmp(path, "/assets/v4/", 11) == 0)
+            handle_scoped_replay(cfd, req, path);
+        else if (strncmp(path, ASSET_URL_PREFIX, ASSET_URL_PREFIX_LEN) == 0)
             handle_asset(cfd, req, path);
-        else if (strcmp(path, "/api/frame") == 0)
-            handle_frame(cfd, query);
-        else if (strcmp(path, "/api/frames") == 0)
-            handle_frames(cfd, query);
-        else if (strcmp(path, "/api/pose") == 0)
-            handle_pose(cfd, query);
-        else if (strcmp(path, "/api/set") == 0)
-            handle_set(cfd, query);
-        else if (strcmp(path, "/api/upload") == 0) {
-            char cl[32] = "0";
-            header_value(req, "Content-Length", cl, sizeof cl);
-            size_t clen = (size_t)strtoul(cl, NULL, 10);
-            const char *body = strstr(req, "\r\n\r\n");
-            body = body ? body + 4 : req + req_len;
-            size_t have = (size_t)((req + req_len) - body);
-            handle_upload(cfd, query, clen, body, have);
-        } else
+        else
             send_error(cfd, 404, "Not Found", "not found");
     }
     close(cfd);
@@ -2252,21 +1219,6 @@ int main(int argc, char **argv) {
     const char *port = getenv("PORT");
     long p = port ? strtol(port, NULL, 10) : 8080;
 
-    memset(&g_active, 0, sizeof g_active);
-    if (load_replay(g_dir, "vertical.slp") != 0) {
-        DIR *d = opendir(g_dir);
-        if (d) {
-            struct dirent *e;
-            while ((e = readdir(d))) {
-                size_t l = strlen(e->d_name);
-                if (l > 4 && strcmp(e->d_name + l - 4, ".slp") == 0 &&
-                    load_replay(g_dir, e->d_name) == 0)
-                    break;
-            }
-            closedir(d);
-        }
-    }
-
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     if (lfd < 0) { perror("socket"); return 1; }
     int one = 1;
@@ -2287,9 +1239,6 @@ int main(int argc, char **argv) {
 
     printf("SLP debug viewer serving http://%s:%ld  (replays dir: %s, assets: %s)\n",
            host, p, g_dir, asset_dir());
-    if (g_active.replay.frame_count > 0)
-        printf("active replay: %s  frames=%d..%d\n", g_active.name,
-               g_active.start_frame, g_active.last_frame);
 
     for (;;) {
         int cfd = accept(lfd, NULL, NULL);

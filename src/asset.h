@@ -15,10 +15,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ASSET_SCHEMA_VERSION 4
+#define ASSET_SCHEMA_VERSION 5
 /* Bump when extract --all writes a new class of files (e.g. stage .anims).
    Persistent Docker volumes rebuild when meta.json cache_id does not match. */
-#define ASSET_CACHE_ID 1
+#define ASSET_CACHE_ID 2
 #define ASSET_MAGIC 0x4D444C00u /* "MDL\0" for models */
 
 /* ---- model (shared by characters and stage sections) ---- */
@@ -42,6 +42,36 @@ typedef struct {
     uint16_t bone[4];
 } asset_vertex_t;
 
+/* HSD TObj TEV / texgen + material combine state, baked per primitive group.
+   Mirrors the fields HSD_TObjLoadDesc + HSD_TObjTevLoadDesc carry so the
+   runtime can reproduce the GX two-stage texture combine (see docs/WEBGL2.md). */
+typedef struct {
+    uint8_t tev_active;      /* bit0 COLOR_TEV, bit1 ALPHA_TEV (HSD_TObjTevActive) */
+    uint8_t color_op;        /* 0 COMP, 1 ADD, 2 SUB */
+    uint8_t alpha_op;
+    uint8_t color_bias;      /* 0 ZERO, 1 +0.5, 2 -0.5, 3 +1 */
+    uint8_t alpha_bias;
+    uint8_t color_scale;     /* 0 x1, 1 x2, 2 x4, 3 x0.5 */
+    uint8_t alpha_scale;
+    uint8_t color_clamp;
+    uint8_t alpha_clamp;
+    uint8_t color_in[4];     /* HSD_TObjTevColorIn selectors */
+    uint8_t alpha_in[4];     /* HSD_TObjTevAlphaIn selectors */
+    uint8_t colormap;        /* HSD_TObjFlags (flags>>16)&0xF: NONE..SUB */
+    uint8_t alphamap;        /* HSD_TObjFlags (flags>>20)&0xF */
+    uint8_t wrap_s;          /* 0 CLAMP, 1 REPEAT, 2 MIRROR */
+    uint8_t wrap_t;
+    uint8_t repeat_s;
+    uint8_t repeat_t;
+    float blend;             /* TOBJ blending factor (for BLEND combine) */
+    uint8_t constant[4];     /* TEV KONST color (RGBA) */
+    uint8_t tev0[4];         /* TEV0 register (RGBA) */
+    uint8_t tev1[4];         /* TEV1 register (RGBA) */
+    float tex_scale[2];      /* TOBJ scale.x/y */
+    float tex_rot;           /* TOBJ rotation.z (radians) */
+    float tex_trans[2];      /* TOBJ translation.x/y */
+} asset_tev_t;
+
 typedef struct {
     int16_t texture_idx;  /* -1 = none */
     uint32_t indices_start;
@@ -49,6 +79,7 @@ typedef struct {
     uint32_t mobj_flags;
     uint8_t model_group_idx;
     uint8_t pad[3];
+    asset_tev_t tev;
 } asset_pgroup_t;
 
 typedef struct {

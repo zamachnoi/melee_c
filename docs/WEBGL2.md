@@ -9,25 +9,18 @@ http://spire:8080/
 /?replay={sha256}&slot=2&frame=8
 ```
 
-The C software renderer remains the migration oracle and is not the product
-path:
-
-```text
-/?renderer=software
-```
-
-`?renderer=webgl2` is still accepted as an explicit alias. Raster frame
-endpoints stay available for reference images until they have no remaining
-dependency.
+The C software rasterizer was removed; WebGL2 is the only renderer. Stage
+sections, fighters, items, and effects all draw through the same WebGL2 path.
 
 The page runs its WebGL2, shader, floating-point texture, texture-size, and
 vertex-capability gate before requesting a replay timeline or reusable model,
 animation, and stage assets. It evaluates every active slot's keyed SRT tracks
 in TypeScript, uploads independent bone hierarchies into RGBA32F textures, and
 skins each fighter in the vertex shader. This supports multiple ports,
-same-model instances, and followers such as Nana. The FD section uses the same
-visibility rules as the C renderer. Replay and follow-target selectors use real
-display names; `slot` and `frame` query parameters make a case reproducible.
+same-model instances, and followers such as Nana. Stage sections use HSD Maya
+static-scale compensation and the baked TEV / texgen material state so the
+backdrop colours and UVs match the game. Replay and follow-target selectors use
+real display names; `slot` and `frame` query parameters make a case reproducible.
 
 Playback uses an integer 60 Hz replay clock. Space toggles play/pause, the arrow
 keys or buttons step by one frame, and the range input scrubs. Original, fit,
@@ -93,10 +86,10 @@ Measured on 2026-08-17 in Chromium:
 
 ## Phase 6 cutover
 
-- `/` serves the WebGL2 page. `/?renderer=software` serves the C raster viewer.
+- `/` serves the WebGL2 page.
 - Replay upload lives on the default page via `POST /api/replays`.
-- `/api/frame`, `/api/frames`, and `/api/replays/{id}/reference` remain as the
-  visual oracle. They are not used during WebGL2 playback.
+- `/api/replays/{id}/manifest` and `/api/replays/{id}/timeline` back the
+  replay picker and the completed-replay snapshot.
 
 ## Known visual discrepancies
 

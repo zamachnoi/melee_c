@@ -146,6 +146,21 @@ static asset_model_t *model_from_reader(reader_t *r) {
         pg->model_group_idx = rd8(r);
         rd8(r);
         rd16(r);
+        asset_tev_t *t = &pg->tev;
+        t->tev_active = rd8(r); t->color_op = rd8(r); t->alpha_op = rd8(r);
+        t->color_bias = rd8(r); t->alpha_bias = rd8(r); t->color_scale = rd8(r); t->alpha_scale = rd8(r);
+        t->color_clamp = rd8(r); t->alpha_clamp = rd8(r);
+        for (int k = 0; k < 4; k++) t->color_in[k] = rd8(r);
+        for (int k = 0; k < 4; k++) t->alpha_in[k] = rd8(r);
+        t->colormap = rd8(r); t->alphamap = rd8(r);
+        t->wrap_s = rd8(r); t->wrap_t = rd8(r); t->repeat_s = rd8(r); t->repeat_t = rd8(r);
+        t->blend = rdf32(r);
+        rd_bytes(r, t->constant, 4);
+        rd_bytes(r, t->tev0, 4);
+        rd_bytes(r, t->tev1, 4);
+        t->tex_scale[0] = rdf32(r); t->tex_scale[1] = rdf32(r);
+        t->tex_rot = rdf32(r);
+        t->tex_trans[0] = rdf32(r); t->tex_trans[1] = rdf32(r);
     }
     m->phongs = calloc(m->phong_count ? m->phong_count : 1, sizeof(asset_phong_t));
     for (uint32_t i = 0; i < m->phong_count; i++) {

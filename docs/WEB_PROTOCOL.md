@@ -24,7 +24,6 @@ POST /api/replays
 GET  /api/replays
 GET  /api/replays/{sha256}/manifest
 GET  /api/replays/{sha256}/timeline
-GET  /api/replays/{sha256}/reference?n={frame}  (migration oracle only)
 ```
 
 `POST /api/replays` accepts raw SLP bytes and an `X-Replay-Name` display-name
@@ -104,14 +103,22 @@ back to SNAPSHOT when resumption is unavailable.
 
 ## Asset routes
 
+The on-disk cache is grouped: `icons/`, `v4/` (schema 4), and `v5/`
+(schema 5). Schema-5 assets live under `v5/characters/<name>/`,
+`v5/stages/`, and `v5/effects/`, and are served by category:
+
 ```text
-/assets/v4/models/{character}-{costume}.model
-/assets/v4/anims/{character}-{costume}.anims
-/assets/v4/stages/fd.stage
+/assets/vN/characters/{character}/{character}-{costume}.model
+/assets/vN/characters/{character}/{character}-{costume}.anims
+/assets/vN/stages/fd.stage
+/assets/vN/stages/fd.anims
+/assets/vN/effects/{effect}.model
+/assets/vN/effects.json
+/assets/vN/icons/{character}-{costume}.png
 ```
 
 Only lowercase alphanumeric, `_`, `-`, and the expected suffix are accepted.
-Files are validated for `MDL\0` and schema 4 before delivery, then served with a
+Files are validated for `MDL\0` and schema 5 before delivery, then served with a
 SHA-256 ETag and `Cache-Control: public, max-age=31536000, immutable`. The
 TypeScript parsers apply strict count, offset, dimension, and decoded-byte
 limits before allocation.

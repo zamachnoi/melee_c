@@ -5,7 +5,7 @@ CPPFLAGS ?= -Isrc
 BIN := bin
 BUILD := build
 
-all: $(BIN)/melee $(BIN)/test_rollback $(BIN)/test_timeline $(BIN)/viewer $(BIN)/test_asset $(BIN)/test_render $(BIN)/test_pose $(BIN)/extract_tool
+all: $(BIN)/melee $(BIN)/test_rollback $(BIN)/test_timeline $(BIN)/viewer $(BIN)/extract_tool
 
 $(BIN)/melee: $(BUILD)/main.o $(BUILD)/parser.o
 	@mkdir -p $(BIN)
@@ -19,25 +19,13 @@ $(BIN)/test_timeline: tests/test_timeline.c src/timeline.c src/sha256.c src/pars
 	@mkdir -p $(BIN) $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_timeline.c src/timeline.c src/sha256.c src/parser.c
 
-$(BIN)/test_asset: tests/test_asset.c src/asset.c src/render.c
-	@mkdir -p $(BIN)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
-
-$(BIN)/test_render: tests/test_render.c src/asset.c src/render.c
-	@mkdir -p $(BIN)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
-
-$(BIN)/test_pose: tests/test_pose.c src/asset.c src/render.c
-	@mkdir -p $(BIN)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
-
 $(BIN)/extract_tool: tools/extract/extract.c src/asset.h
 	@mkdir -p $(BIN)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm -lz
 
-$(BIN)/viewer: src/viewer.c src/parser.c src/asset.c src/render.c src/timeline.c src/sha256.c src/parser.h src/asset.h src/render.h src/timeline.h src/protocol.h src/sha256.h
+$(BIN)/viewer: src/viewer.c src/parser.c src/asset.c src/timeline.c src/sha256.c src/parser.h src/asset.h src/timeline.h src/protocol.h src/sha256.h
 	@mkdir -p $(BIN)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ src/viewer.c src/parser.c src/asset.c src/render.c src/timeline.c src/sha256.c -lpthread -lm -lz
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ src/viewer.c src/parser.c src/asset.c src/timeline.c src/sha256.c -lpthread -lm -lz
 
 $(BUILD)/%.o: src/%.c src/parser.h
 	@mkdir -p $(BUILD)
@@ -53,9 +41,8 @@ $(BIN)/datdump: tools/extract/datdump.c
 
 datdump: $(BIN)/datdump
 
-test: $(BIN)/test_rollback $(BIN)/test_pose $(BIN)/test_timeline
+test: $(BIN)/test_rollback $(BIN)/test_timeline
 	$(BIN)/test_rollback
-	$(BIN)/test_pose
 	$(BIN)/test_timeline $(BUILD)/timeline-golden.bin
 	npm test
 
@@ -67,11 +54,11 @@ web-build:
 
 measure-assets:
 	npm run build
-	node tools/measure-assets.mjs fixtures/cache/falco-2.model fixtures/cache/falco-0.anims fixtures/cache/fox-0.model fixtures/cache/fox-0.anims fixtures/cache/fd.stage
+	node tools/measure-assets.mjs fixtures/cache/v5/characters/falco/falco-2.model fixtures/cache/v5/characters/falco/falco-0.anims fixtures/cache/v5/characters/fox/fox-0.model fixtures/cache/v5/characters/fox/fox-0.anims fixtures/cache/v5/stages/fd.stage
 
 golden-fixtures: web-build
-	@. ./dev-server.env && DEV_URL="$$DEV_URL" node tools/capture-golden.mjs
-	@. ./dev-server.env && DEV_URL="$$DEV_URL" node tools/capture-golden.mjs fixtures/ICs.slp build/golden/ics
+	@echo "golden image capture was removed with the C software renderer"
+	@echo "use tests/js/*.test.js + test-http for parity checks"
 
 test-http: web-build
 	@. ./dev-server.env && DEV_URL="$$DEV_URL" node tests/http.integration.mjs
@@ -85,10 +72,6 @@ share-cache:
 	@git worktree list --porcelain | awk '/^worktree /{print $$2}' | while read -r wt; do \
 		scripts/ensure-shared-cache.sh "$$wt"; \
 	done
-
-test_asset: cache $(BIN)/test_asset
-	$(BIN)/test_asset cache/fox-0.model cache/fox-0.anims cache/fd.stage
-	$(BIN)/test_asset cache/falco-2.model cache/falco-0.anims cache/fd.stage
 
 run: $(BIN)/melee
 	$(BIN)/melee fixtures/vertical.slp
@@ -123,4 +106,4 @@ dump: $(BIN)/datdump
 clean:
 	rm -rf $(BIN) $(BUILD)
 
-.PHONY: all test typecheck web-build measure-assets golden-fixtures test-http cache share-cache test_asset run viewer dump clean
+.PHONY: all test typecheck web-build measure-assets golden-fixtures test-http cache share-cache run viewer dump clean

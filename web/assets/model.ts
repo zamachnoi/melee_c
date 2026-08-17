@@ -1,7 +1,7 @@
 import { BinaryReader, boundedCount } from './binary.js';
 
 export const ASSET_MAGIC = 0x4d444c00;
-export const ASSET_SCHEMA = 4;
+export const ASSET_SCHEMA = 5;
 
 const LIMITS = Object.freeze({
   bones: 1024,
@@ -69,13 +69,26 @@ export function parseModelFromReader(reader: BinaryReader, label = 'model') {
     const materialFlags = reader.u32();
     const modelGroupIndex = reader.u8();
     reader.u8(); reader.u16();
+    const tev = {
+      active: reader.u8(), colorOp: reader.u8(), alphaOp: reader.u8(),
+      colorBias: reader.u8(), alphaBias: reader.u8(), colorScale: reader.u8(), alphaScale: reader.u8(),
+      colorClamp: reader.u8(), alphaClamp: reader.u8(),
+      colorIn: reader.bytes(4), alphaIn: reader.bytes(4),
+      colormap: reader.u8(), alphamap: reader.u8(),
+      wrapS: reader.u8(), wrapT: reader.u8(), repeatS: reader.u8(), repeatT: reader.u8(),
+      blend: reader.f32(),
+      constant: reader.bytes(4), tev0: reader.bytes(4), tev1: reader.bytes(4),
+      texScale: new Float32Array([reader.f32(), reader.f32()]),
+      texRot: reader.f32(),
+      texTrans: new Float32Array([reader.f32(), reader.f32()]),
+    };
     if (indexStart > indexCount || indexLength > indexCount - indexStart) {
       throw new RangeError(`${label}: primitive group ${i} has invalid index range`);
     }
     if (textureIndex < -1 || textureIndex >= textureCount) {
       throw new RangeError(`${label}: primitive group ${i} has invalid texture ${textureIndex}`);
     }
-    primitiveGroups.push({ textureIndex, indexStart, indexLength, materialFlags, modelGroupIndex });
+    primitiveGroups.push({ textureIndex, indexStart, indexLength, materialFlags, modelGroupIndex, tev });
   }
 
   const phongs = [];

@@ -263,6 +263,24 @@ static void mtx_invert_affine(const mtx3x4 m,mtx3x4 out){
     out[9]=-(i00*tx+i01*ty+i02*tz);out[10]=-(i10*tx+i11*ty+i12*tz);out[11]=-(i20*tx+i21*ty+i22*tz);
 }
 
+#define JOBJ_CLASSICAL_SCALE_FLAG (1u<<3)
+
+/* HSD "Maya static scale compensation": HSD (via Maya export) scales a joint's
+   local matrix so that a non-uniformly scaled ancestor does not shear the
+   joint.  Column-major 3x4; `ps` is the accumulated ancestor scale.  Mirrors
+   noclip's applyMayaSSC(). */
+static void mtx_apply_ssc(mtx3x4 m,const float ps[3]){
+    m[1]*=ps[0]/ps[1];m[2]*=ps[0]/ps[2];
+    m[3]*=ps[1]/ps[0];m[5]*=ps[1]/ps[2];
+    m[6]*=ps[2]/ps[0];m[7]*=ps[2]/ps[1];
+}
+
+static void mtx_scale_of(const mtx3x4 m,float s[3]){
+    s[0]=sqrtf(m[0]*m[0]+m[1]*m[1]+m[2]*m[2]);
+    s[1]=sqrtf(m[3]*m[3]+m[4]*m[4]+m[5]*m[5]);
+    s[2]=sqrtf(m[6]*m[6]+m[7]*m[7]+m[8]*m[8]);
+}
+
 /* ================================================================== */
 /* Texture decode (TPL -> RGBA)                                       */
 /* ================================================================== */
@@ -379,8 +397,8 @@ static void decode_texture(uint32_t fmt,uint16_t w,uint16_t h,const uint8_t*data
                 uint8_t c1r=(uint8_t)(((c1w>>11)&0x1F)<<3),c1g=(uint8_t)(((c1w>>5)&0x3F)<<2),c1b=(uint8_t)((c1w&0x1F)<<3);
                 bool mode=c0w>c1w;
                 uint32_t c2,c3;
-                if(mode){c2=0xFF000000u|((uint32_t)((2*c0r+c1r)/3))|((uint32_t)((2*c0g+c1g)/3)<<8)|((uint32_t)((2*c0b+c1b)/3)<<16);
-                         c3=0xFF000000u|((uint32_t)((c0r+2*c1r)/3))|((uint32_t)((c0g+2*c1g)/3)<<8)|((uint32_t)((c0b+2*c1b)/3)<<16);}
+                if(mode){c2=0xFF000000u|((uint32_t)((5*c0r+3*c1r)/8))|((uint32_t)((5*c0g+3*c1g)/8)<<8)|((uint32_t)((5*c0b+3*c1b)/8)<<16);
+                         c3=0xFF000000u|((uint32_t)((3*c0r+5*c1r)/8))|((uint32_t)((3*c0g+5*c1g)/8)<<8)|((uint32_t)((3*c0b+5*c1b)/8)<<16);}
                 else{c2=0xFF000000u|((uint32_t)((c0r+c1r)/2))|((uint32_t)((c0g+c1g)/2)<<8)|((uint32_t)((c0b+c1b)/2)<<16);c3=0;}
                 uint32_t pixel=r32(data+off+4);
                 uint32_t ix=x0+4*y0,pidx=(pixel>>(30-2*ix))&3;
@@ -488,6 +506,9 @@ static void decode_pobj(const dat_t*d,const reloc_idx_t*ri,uint32_t pobj_rel,
     while(cur<dl_len){
         uint8_t ptype=dl[cur];if(ptype==0)break;cur++;
         if(cur+2>dl_len)break;
+        /* GX packs the vertex-format index in the low 3 bits of the command
+           byte; only the top bits select the primitive topology. */
+        uint8_t prim=ptype&0xF8;
         uint16_t vcount=r16(dl+cur);cur+=2;tn=0;
         for(uint32_t vi=0;vi<vcount;vi++){
             asset_vertex_t v;memset(&v,0,sizeof v);memset(v.color,255,sizeof v.color);v.weight[0]=1.0f;v.bone[0]=(uint16_t)(bone_idx>=0?bone_idx:0);
@@ -539,11 +560,11 @@ static void decode_pobj(const dat_t*d,const reloc_idx_t*ri,uint32_t pobj_rel,
             }
             geo_push_v(g,v);tmp[tn++]=(uint16_t)(g->vcount-1);
         }
-        switch(ptype){
+        switch(prim){
             case 0x90:for(size_t i=0;i+2<tn;i+=3)geo_push_i(g,tmp[i]),geo_push_i(g,tmp[i+1]),geo_push_i(g,tmp[i+2]);break;
             case 0x98:for(size_t i=0;i+2<tn;i++){if(i&1)geo_push_i(g,tmp[i]),geo_push_i(g,tmp[i+2]),geo_push_i(g,tmp[i+1]);else geo_push_i(g,tmp[i]),geo_push_i(g,tmp[i+1]),geo_push_i(g,tmp[i+2]);}break;
             case 0xA0:for(size_t i=1;i+1<tn;i++)geo_push_i(g,tmp[0]),geo_push_i(g,tmp[i]),geo_push_i(g,tmp[i+1]);break;
-            case 0x80:for(size_t i=0;i+3<tn;i+=4)geo_push_i(g,tmp[i]),geo_push_i(g,tmp[i+1]),geo_push_i(g,tmp[i+2]),geo_push_i(g,tmp[i+2]),geo_push_i(g,tmp[i+3]),geo_push_i(g,tmp[i]);break;
+            case 0x80:case 0x88:for(size_t i=0;i+3<tn;i+=4)geo_push_i(g,tmp[i]),geo_push_i(g,tmp[i+1]),geo_push_i(g,tmp[i+2]),geo_push_i(g,tmp[i+2]),geo_push_i(g,tmp[i+3]),geo_push_i(g,tmp[i]);break;
             default:break;
         }
     }
@@ -652,6 +673,49 @@ static int16_t tex_resolve_mobj(builder_t*b,uint32_t tobj_rel){
     return first;
 }
 
+/* Decode the first TOBJ's TEV descriptor + texgen into the pgroup's baked
+   material state.  Mirrors noclip's HSD_TObjLoadDesc / HSD_TObjTevLoadDesc. */
+static void tev_from_tobj(const dat_t*d,uint32_t tobj_rel,asset_tev_t*out){
+    memset(out,0,sizeof*out);
+    out->color_clamp=out->alpha_clamp=1;
+    out->repeat_s=out->repeat_t=1;
+    out->blend=1.0f;
+    out->tex_scale[0]=out->tex_scale[1]=1.0f;
+    out->constant[3]=out->tev0[3]=out->tev1[3]=0xFF;
+    const uint8_t*td=dat_at(d,tobj_rel);if(!td)return;
+    uint32_t flags=r32(td+0x40);
+    out->colormap=(uint8_t)((flags>>16)&0xF);
+    out->alphamap=(uint8_t)((flags>>20)&0xF);
+    out->wrap_s=(uint8_t)r32(td+0x34);
+    out->wrap_t=(uint8_t)r32(td+0x38);
+    out->repeat_s=td[0x3C]?td[0x3C]:1;
+    out->repeat_t=td[0x3D]?td[0x3D]:1;
+    out->tex_scale[0]=rf32(td+0x1C);
+    out->tex_scale[1]=rf32(td+0x20);
+    out->tex_rot=rf32(td+0x18);
+    out->tex_trans[0]=rf32(td+0x28);
+    out->tex_trans[1]=rf32(td+0x2C);
+    float blend=rf32(td+0x44);
+    if(blend==blend)out->blend=blend;
+    if(!(out->tex_scale[0]==out->tex_scale[0]))out->tex_scale[0]=1.0f;
+    if(!(out->tex_scale[1]==out->tex_scale[1]))out->tex_scale[1]=1.0f;
+    uint32_t tev_rel=r32(td+0x58);
+    if(!tev_rel)return;
+    const uint8_t*tv=dat_at(d,tev_rel);
+    if(!tv)return;
+    uint32_t active=r32(tv+0x1C);
+    if(active&0x40000000u)out->tev_active|=1;   /* COLOR_TEV */
+    if(active&0x80000000u)out->tev_active|=2;   /* ALPHA_TEV */
+    out->color_op=tv[0];out->alpha_op=tv[1];
+    out->color_bias=tv[2];out->alpha_bias=tv[3];
+    out->color_scale=tv[4];out->alpha_scale=tv[5];
+    out->color_clamp=tv[6]?1:0;out->alpha_clamp=tv[7]?1:0;
+    for(int i=0;i<4;i++){out->color_in[i]=tv[8+i];out->alpha_in[i]=tv[0x0C+i];}
+    memcpy(out->constant,tv+0x10,4);
+    memcpy(out->tev0,tv+0x14,4);
+    memcpy(out->tev1,tv+0x18,4);
+}
+
 static void build_bones(builder_t*b,uint32_t root_rel,int32_t parent){
     if(b->m->bone_count >= 512) return;
     const uint8_t*j=dat_at(b->d,root_rel);if(!j)return;
@@ -689,6 +753,7 @@ static void build_geometry(builder_t*b,uint32_t root_rel){
                 cursor=next_d;continue;
             }
             uint32_t idx_start=(uint32_t)b->geo.icount;int16_t tex=-1;uint32_t mfl=0;
+            asset_tev_t material_tev;memset(&material_tev,0,sizeof material_tev);
             asset_phong_t material;memset(&material,0,sizeof material);
             memset(material.ambient,255,sizeof material.ambient);
             memset(material.diffuse,255,sizeof material.diffuse);
@@ -699,7 +764,7 @@ static void build_geometry(builder_t*b,uint32_t root_rel){
                 if(md){
                     mfl=r32(md+0x04);
                     uint32_t tobj_rel=r32(md+0x08),mat_rel=r32(md+0x0C);
-                    if(tobj_rel)tex=tex_resolve_mobj(b,tobj_rel);
+                    if(tobj_rel){tex=tex_resolve_mobj(b,tobj_rel);tev_from_tobj(b->d,tobj_rel,&material_tev);}
                     if(mat_rel){
                         const uint8_t*mat=dat_at(b->d,mat_rel);
                         if(mat){
@@ -716,7 +781,9 @@ static void build_geometry(builder_t*b,uint32_t root_rel){
             if(b->geo.icount>idx_start){
                 b->m->pgroups=realloc(b->m->pgroups,(b->m->pgroup_count+1)*sizeof(asset_pgroup_t));
                 uint8_t group=(b->filter&&b->filter->enabled&&dobj_index<256)?b->filter->group[dobj_index]:0;
-                b->m->pgroups[b->m->pgroup_count++]=(asset_pgroup_t){.texture_idx=tex,.indices_start=idx_start,.indices_len=(uint32_t)(b->geo.icount-idx_start),.mobj_flags=mfl,.model_group_idx=group};
+                asset_pgroup_t pg={.texture_idx=tex,.indices_start=idx_start,.indices_len=(uint32_t)(b->geo.icount-idx_start),.mobj_flags=mfl,.model_group_idx=group};
+                pg.tev=material_tev;
+                b->m->pgroups[b->m->pgroup_count++]=pg;
                 b->m->phongs=realloc(b->m->phongs,(b->m->phong_count+1)*sizeof(asset_phong_t));
                 b->m->phongs[b->m->phong_count++]=material;
             }
@@ -734,13 +801,24 @@ static asset_model_t*build_model(const dat_t*d,uint32_t root_rel,
     reloc_idx_t ri;reloc_build(d,&ri);
     builder_t b={.d=d,.ri=&ri,.m=m,.filter=filter};
     build_bones(&b,root_rel,-1);
+    /* Compute bind-pose world + inverse-bind with HSD's Maya static scale
+       compensation.  Bones are stored preorder (parent before children), so a
+       single ascending pass propagates the accumulated parent scale. */
     mtx3x4*world=calloc(m->bone_count?m->bone_count:1,sizeof(mtx3x4));
+    float*acc=calloc((m->bone_count?m->bone_count:1)*3,sizeof(float));
     for(uint32_t i=0;i<m->bone_count;i++){
-        if(m->bones[i].parent==UINT16_MAX)memcpy(world[i],m->bones[i].base,sizeof(mtx3x4));
-        else mtx_mul(world[m->bones[i].parent],m->bones[i].base,world[i]);
-        mtx_invert_affine(world[i],m->bones[i].inv_world);
+        asset_bone_t*bone=&m->bones[i];
+        float own[3];mtx_scale_of(bone->base,own);
+        const float*ps=bone->parent==UINT16_MAX?(float[3]){1.0f,1.0f,1.0f}:&acc[bone->parent*3];
+        float*ai=&acc[i*3];
+        if(bone->flags&JOBJ_CLASSICAL_SCALE_FLAG){ai[0]=ps[0];ai[1]=ps[1];ai[2]=ps[2];}
+        else{ai[0]=own[0]*ps[0];ai[1]=own[1]*ps[1];ai[2]=own[2]*ps[2];}
+        memcpy(world[i],bone->base,sizeof(mtx3x4));
+        mtx_apply_ssc(world[i],ps);
+        if(bone->parent!=UINT16_MAX)mtx_mul(world[bone->parent],world[i],world[i]);
+        mtx_invert_affine(world[i],bone->inv_world);
     }
-    free(world);
+    free(world);free(acc);
     build_geometry(&b,root_rel);
     m->vertices=b.geo.verts;m->vertex_count=(uint32_t)b.geo.vcount;
     m->indices=b.geo.indices;m->index_count=(uint32_t)b.geo.icount;
@@ -782,6 +860,19 @@ static void write_model(FILE*f,const asset_model_t*m){
         w32(f,m->pgroups[i].indices_start);w32(f,m->pgroups[i].indices_len);
         w32(f,m->pgroups[i].mobj_flags);w8(f,m->pgroups[i].model_group_idx);
         w8(f,0);w16(f,0);
+        const asset_tev_t*t=&m->pgroups[i].tev;
+        w8(f,t->tev_active);w8(f,t->color_op);w8(f,t->alpha_op);
+        w8(f,t->color_bias);w8(f,t->alpha_bias);w8(f,t->color_scale);w8(f,t->alpha_scale);
+        w8(f,t->color_clamp);w8(f,t->alpha_clamp);
+        for(int k=0;k<4;k++)w8(f,t->color_in[k]);
+        for(int k=0;k<4;k++)w8(f,t->alpha_in[k]);
+        w8(f,t->colormap);w8(f,t->alphamap);
+        w8(f,t->wrap_s);w8(f,t->wrap_t);w8(f,t->repeat_s);w8(f,t->repeat_t);
+        wf(f,t->blend);
+        fwrite(t->constant,1,4,f);fwrite(t->tev0,1,4,f);fwrite(t->tev1,1,4,f);
+        wf(f,t->tex_scale[0]);wf(f,t->tex_scale[1]);
+        wf(f,t->tex_rot);
+        wf(f,t->tex_trans[0]);wf(f,t->tex_trans[1]);
     }
     for(uint32_t i=0;i<m->phong_count;i++){
         fwrite(m->phongs[i].ambient,1,4,f);fwrite(m->phongs[i].diffuse,1,4,f);fwrite(m->phongs[i].specular,1,4,f);
@@ -1235,15 +1326,83 @@ static void decode_map_anim(const dat_t*d,const reloc_idx_t*ri,uint32_t group_re
                             uint32_t root_jobj_rel,uint32_t map_id,asset_action_t*act){
     memset(act,0,sizeof*act);
     snprintf(act->name,sizeof act->name,"map%u",map_id);
+    /* Like noclip, treat every stage AnimJoint clip as a looping loop: the
+       in-game platform/background cycles never stop. */
+    act->loop=true;
     if(!root_jobj_rel)return;
     uint32_t ajp=rdptr(d,ri,group_rel,0x04);
     uint32_t aj0=ajp?rdptr(d,ri,ajp-0x20,0):0;
-    uint32_t flags=rdptr(d,ri,group_rel,0x28);
-    if(flags&&flags<d->len&&d->bytes[flags])act->loop=true;
     if(!aj0)return;
     aj_walk_t w={.d=d,.ri=ri,.act=act};
     uint32_t bone=0;
     walk_animjoint(&w,root_jobj_rel,aj0,&bone);
+}
+
+/* Bake the initial state of a stage section's MatAnimJoint clip (matAnim[0],
+   mirroring noclip's HSD_AObjLoadMatAnimJoint) into the section's materials.
+   The color tracks animate MOBJ ambient/diffuse/specular/alpha; sampling at
+   frame 0 matches the stage's starting look. */
+static void free_track_list(asset_track_t*tracks,uint32_t n){
+    for(uint32_t i=0;i<n;i++)free(tracks[i].keys);
+    free(tracks);
+}
+
+static float clampf(float v){return v<0.0f?0.0f:(v>1.0f?1.0f:v);}
+
+static void matanim_apply(const dat_t*d,const reloc_idx_t*ri,
+                          uint32_t mat_joint_rel,uint32_t jobj_rel,
+                          uint32_t*bone,const asset_model_t*m){
+    if(!jobj_rel||*bone>=m->bone_count)return;
+    uint16_t bone_index=(uint16_t)(*bone)++;
+    uint32_t child_maj=0,next_maj=0;
+    if(mat_joint_rel&&mat_joint_rel<d->reloc_start){
+        uint32_t ma=dat_abs(d,mat_joint_rel);
+        if(ma+0x10<=d->len){
+            child_maj=r32(d->bytes+ma);
+            next_maj=r32(d->bytes+ma+4);
+            uint32_t mat_list=r32(d->bytes+ma+8);
+            if(mat_list&&mat_list<d->reloc_start){
+                uint32_t ml=dat_abs(d,mat_list);
+                uint32_t guard=0;
+                while(ml&&ml+0x10<=d->len&&guard++<64){
+                    uint32_t aobj_rel=r32(d->bytes+ml+4);
+                    if(aobj_rel&&aobj_rel<d->reloc_start){
+                        uint32_t aa=dat_abs(d,aobj_rel);
+                        if(aa+0x10<=d->len){
+                            asset_track_t*tracks=NULL;uint32_t nt=0;
+                            uint32_t fobj=rdptr(d,ri,aobj_rel,8);
+                            decode_fobj_chain(d,ri,fobj,&tracks,&nt);
+                            if(nt){
+                                float v[11];memset(v,0,sizeof v);
+                                for(uint32_t k=0;k<nt&&k<11;k++)v[tracks[k].channel]=sample_keys_c(&tracks[k],0.0f);
+                                const asset_bone_t*b=&m->bones[bone_index];
+                                uint32_t pend=b->pgroup_start+b->pgroup_len;
+                                if(pend>m->pgroup_count)pend=m->pgroup_count;
+                                for(uint32_t p=b->pgroup_start;p<pend;p++){
+                                    asset_phong_t*ph=&m->phongs[p];
+                                    if(ph){
+                                        for(int c=0;c<3;c++){
+                                            if(tracks[c+1].key_count)ph->ambient[c]=(uint8_t)(clampf(v[c+1])*255.0f);
+                                            if(tracks[c+4].key_count)ph->diffuse[c]=(uint8_t)(clampf(v[c+4])*255.0f);
+                                            if(tracks[c+7].key_count)ph->specular[c]=(uint8_t)(clampf(v[c+7])*255.0f);
+                                        }
+                                        if(tracks[10].key_count)ph->alpha=clampf(v[10]);
+                                    }
+                                }
+                            }
+                            free_track_list(tracks,nt);
+                        }
+                    }
+                    ml=r32(d->bytes+ml); /* next MatAnim */
+                }
+            }
+        }
+    }
+    const uint8_t*j=dat_at(d,jobj_rel);
+    if(!j)return;
+    uint32_t child_j=r32(j+0x08),next_j=r32(j+0x0C);
+    if(child_j)matanim_apply(d,ri,child_maj,child_j,bone,m);
+    if(next_j)matanim_apply(d,ri,next_maj,next_j,bone,m);
 }
 
 static void free_action(asset_action_t*act){
@@ -1303,6 +1462,10 @@ static int decode_stage(const dat_t*d,asset_stage_t*st,asset_anims_t*anims){
             uint32_t root_jobj_rel=r32(d->bytes+gabs);
             if(root_jobj_rel){
                 asset_model_t*m=build_model(d,root_jobj_rel,NULL);
+                /* Bake matAnim[0]'s starting material colors (frame 0). */
+                uint32_t mat_joint_rel=r32(d->bytes+gabs+0x08);
+                uint32_t bone=0;
+                if(mat_joint_rel)matanim_apply(d,&ri,mat_joint_rel,root_jobj_rel,&bone,m);
                 st->sections[i]=*m;
                 free(m);
             }
@@ -1856,8 +2019,11 @@ static void write_effects_catalog(const char *dir, const catalog_t *cat) {
     printf("wrote effects.json (%zu entries)\n", cat->count);
 }
 
-/* Walk eff*DataTable / itPublicData and dump every JOBJ mesh plus a catalog. */
-static void extract_effects(const fst_list_t *dats, const uint8_t *iso, const char *out) {
+/* Walk eff*DataTable / itPublicData and dump every JOBJ mesh plus a catalog.
+   Meshes land in `out` (v5/effects); the catalog is written to `catalog_dir`
+   (v5 root) so the server can serve /assets/v5/effects.json. */
+static void extract_effects(const fst_list_t *dats, const uint8_t *iso,
+                            const char *out, const char *catalog_dir) {
     unsigned wrote = 0;
     catalog_t cat = {0};
     for (size_t i = 0; i < dats->count; i++) {
@@ -1896,7 +2062,7 @@ static void extract_effects(const fst_list_t *dats, const uint8_t *iso, const ch
         free(ri.offs);
     }
     extract_fighter_articles(dats, iso, out, &cat, &wrote);
-    write_effects_catalog(out, &cat);
+    write_effects_catalog(catalog_dir, &cat);
     free(cat.rows);
     printf("wrote %u item/effect meshes\n", wrote);
 }
@@ -2286,11 +2452,28 @@ int main(int argc,char**argv){
     printf("FST indexed %zu .dat files\n",dats.count);
 
     if(mkdir(out,0755)!=0&&errno!=EEXIST)die("cannot create output directory");
+    /* Models/anims/stages/effects live under <out>/v5 (schema-versioned); the
+       stock-icon PNGs stay in <out>/icons. */
+    char v5[1200];
+    snprintf(v5,sizeof v5,"%s/v5",out);
+    if(mkdir(v5,0755)!=0&&errno!=EEXIST)die("cannot create v5 output directory");
+    /* Group the v5 cache: characters/<name>/, stages/, effects/. */
+    char chars_dir[1200], stages_dir[1200], effects_dir[1200];
+    snprintf(chars_dir,sizeof chars_dir,"%s/characters",v5);
+    snprintf(stages_dir,sizeof stages_dir,"%s/stages",v5);
+    snprintf(effects_dir,sizeof effects_dir,"%s/effects",v5);
+    if(mkdir(chars_dir,0755)!=0&&errno!=EEXIST)die("cannot create characters dir");
+    if(mkdir(stages_dir,0755)!=0&&errno!=EEXIST)die("cannot create stages dir");
+    if(mkdir(effects_dir,0755)!=0&&errno!=EEXIST)die("cannot create effects dir");
 
     if(which_char){
+        /* Per-character directory under v5/characters/<name>/ */
+        char char_dir[1200];
         if(strcasecmp(which_char,"all")==0||all_mode){
             for(size_t c=0;c<CHAR_INFO_N;c++){
                 const char_info_t*ci=&CHAR_INFO[c];
+                snprintf(char_dir,sizeof char_dir,"%s/%s",chars_dir,ci->name);
+                if(mkdir(char_dir,0755)!=0&&errno!=EEXIST)die("cannot create char dir");
                 asset_anims_t*anims=NULL;
                 for(int col=0;col<ci->nmeshes;col++){
                     char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,col);
@@ -2298,12 +2481,14 @@ int main(int argc,char**argv){
                                                           ci->data_dat,ci->anim_dat,NULL);
                     printf("extracting %s (costume %d) mesh=%s\n",ci->name,col,ci->meshes[col]);
                     extract_char(&dats,iso_bytes,ci->data_dat,ci->meshes[col],ci->anim_dat,
-                                 slug,out,anims);
+                                 slug,char_dir,anims);
                 }
             }
         }else{
             const char_info_t*ci=char_lookup(which_char);
             if(!ci){fprintf(stderr,"extract: unknown character '%s'\n",which_char);return 1;}
+            snprintf(char_dir,sizeof char_dir,"%s/%s",chars_dir,ci->name);
+            if(mkdir(char_dir,0755)!=0&&errno!=EEXIST)die("cannot create char dir");
             int have_color=0,color_idx=0;
             for(int i=1;i<argc;i++)
                 if(strncmp(argv[i],"--color=",8)==0){color_idx=atoi(argv[i]+8);have_color=1;break;}
@@ -2315,7 +2500,7 @@ int main(int argc,char**argv){
                 const char*mesh=ci->meshes[color_idx];
                 char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,color_idx);
                 printf("extracting %s (costume %d) mesh=%s\n",ci->name,color_idx,mesh);
-                extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,out,NULL);
+                extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,char_dir,NULL);
             }else{
                 asset_anims_t*anims=NULL;
                 for(int c=0;c<ci->nmeshes;c++){
@@ -2324,7 +2509,7 @@ int main(int argc,char**argv){
                     if(!anims)anims=decode_character_anims(&dats,iso_bytes,
                                                           ci->data_dat,ci->anim_dat,NULL);
                     printf("extracting %s (costume %d) mesh=%s\n",ci->name,c,mesh);
-                    extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,out,anims);
+                    extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,char_dir,anims);
                 }
             }
         }
@@ -2346,12 +2531,12 @@ int main(int argc,char**argv){
                     char name[256];int n=0;
                     for(const char*q=bn;*q&&*q!='.';q++)name[n++]=tolower((unsigned char)*q);
                     snprintf(name+n,sizeof name-(size_t)n,".stage");
-                    write_stage_file(out,name,st);
+                    write_stage_file(stages_dir,name,st);
                     memcpy(name+n,".anims",7);
-                    write_anims_file(out,name,&anims);
+                    write_anims_file(stages_dir,name,&anims);
                     if(strcasecmp(bn,"GrNLa.dat")==0){
-                        write_stage_file(out,"fd.stage",st);
-                        write_anims_file(out,"fd.anims",&anims);
+                        write_stage_file(stages_dir,"fd.stage",st);
+                        write_anims_file(stages_dir,"fd.anims",&anims);
                     }
                     uint32_t animated=0;
                     for(uint32_t a=0;a<anims.action_count;a++)if(anims.actions[a].joint_count)animated++;
@@ -2374,8 +2559,8 @@ int main(int argc,char**argv){
                 asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
                 asset_anims_t anims={0};
                 if(decode_stage(&sd,st,&anims)==0){
-                    write_stage_file(out,"fd.stage",st);
-                    write_anims_file(out,"fd.anims",&anims);
+                    write_stage_file(stages_dir,"fd.stage",st);
+                    write_anims_file(stages_dir,"fd.anims",&anims);
                 }else{
                     printf("stage decode failed\n");
                 }
@@ -2383,9 +2568,9 @@ int main(int argc,char**argv){
             }
         }
     }
-    if(want_effects) extract_effects(&dats,iso_bytes,out);
+    if(want_effects) extract_effects(&dats,iso_bytes,effects_dir,v5);
     if(want_icons || which_char) extract_stock_icons(&dats,iso_bytes,out);
-    write_meta(out,ASSET_SCHEMA_VERSION);
+    write_meta(v5,ASSET_SCHEMA_VERSION);
     free(iso_bytes);
     printf("done\n");
     return 0;

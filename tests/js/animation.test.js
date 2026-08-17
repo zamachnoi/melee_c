@@ -31,8 +31,8 @@ test('animation key sampling matches step, linear, Hermite, and tangent guard ru
 });
 
 test('GPU bone rows reproduce the C bind-pose rigid and weighted vertex rules', () => {
-  const model = parseModel(arrayBuffer('fixtures/cache/falco-2.model'));
-  const animations = parseAnimations(arrayBuffer('fixtures/cache/falco-2.anims'));
+  const model = parseModel(arrayBuffer('fixtures/cache/v5/characters/falco/falco-2.model'));
+  const animations = parseAnimations(arrayBuffer('fixtures/cache/v5/characters/falco/falco-2.anims'));
   const evaluator = new PoseEvaluator(model, animations);
   const fromRows = skinPositions(model, evaluator.evaluateBindPose().boneRows);
   const expected = transformBindPose(model);
@@ -42,8 +42,8 @@ test('GPU bone rows reproduce the C bind-pose rigid and weighted vertex rules', 
 });
 
 test('action resolution and root-motion suppression match the C fallback policy', () => {
-  const model = parseModel(arrayBuffer('fixtures/cache/falco-2.model'));
-  const animations = parseAnimations(arrayBuffer('fixtures/cache/falco-2.anims'));
+  const model = parseModel(arrayBuffer('fixtures/cache/v5/characters/falco/falco-2.model'));
+  const animations = parseAnimations(arrayBuffer('fixtures/cache/v5/characters/falco/falco-2.anims'));
   const wait = findAction(animations, 'Wait1');
   assert.equal(wait, 2);
   assert.deepEqual(resolveAction(animations, 0xffffffff), { index: 2, fallback: true });

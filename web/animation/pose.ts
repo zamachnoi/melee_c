@@ -3,6 +3,7 @@ import type { ModelAsset } from '../assets/model.js';
 
 export const MATRIX_FLOATS = 12;
 const BONE_TEXTURE_FLOATS = 24;
+const JOBJ_CLASSICAL_SCALE = 1 << 3;
 
 export function multiplyAffine(
   a: Float32Array, ao: number, b: Float32Array, bo: number,
@@ -84,6 +85,50 @@ function matrixFromSrt(
   out[offset + 9] = tx; out[offset + 10] = ty; out[offset + 11] = tz;
 }
 
+/** Scale magnitudes of a column-major 3x4 matrix. */
+function matrixScale(matrix: Float32Array, offset: number, out: Float32Array): void {
+  out[0] = Math.hypot(matrix[offset], matrix[offset + 1], matrix[offset + 2]);
+  out[1] = Math.hypot(matrix[offset + 3], matrix[offset + 4], matrix[offset + 5]);
+  out[2] = Math.hypot(matrix[offset + 6], matrix[offset + 7], matrix[offset + 8]);
+}
+
+/** HSD "Maya static scale compensation" on a column-major 3x4 matrix (matches
+    extract.c / noclip applyMayaSSC). */
+function applyMayaSsc(matrix: Float32Array, matrixOffset: number, ps: Float32Array, psOffset: number): void {
+  const ps0 = ps[psOffset], ps1 = ps[psOffset + 1], ps2 = ps[psOffset + 2];
+  matrix[matrixOffset + 1] *= ps0 / ps1;
+  matrix[matrixOffset + 2] *= ps0 / ps2;
+  matrix[matrixOffset + 3] *= ps1 / ps0;
+  matrix[matrixOffset + 5] *= ps1 / ps2;
+  matrix[matrixOffset + 6] *= ps2 / ps0;
+  matrix[matrixOffset + 7] *= ps2 / ps1;
+}
+
+/** Per-bone accumulated ancestor scale for HSD static scale compensation.
+    `scale` holds each bone's own scale (from decomposeBase).  Bones are stored
+    preorder, so one ascending pass propagates parent scale. */
+function computeParentScale(
+  model: ModelAsset, scale: Float32Array, psOut: Float32Array, accOut: Float32Array,
+): void {
+  for (let bone = 0; bone < model.boneCount; bone++) {
+    const parent = model.boneParents[bone];
+    const o = bone * 3;
+    if (parent === 0xffff) {
+      psOut[o] = 1; psOut[o + 1] = 1; psOut[o + 2] = 1;
+    } else {
+      const po = parent * 3;
+      psOut[o] = accOut[po]; psOut[o + 1] = accOut[po + 1]; psOut[o + 2] = accOut[po + 2];
+    }
+    if (model.boneFlags[bone] & JOBJ_CLASSICAL_SCALE) {
+      accOut[o] = psOut[o]; accOut[o + 1] = psOut[o + 1]; accOut[o + 2] = psOut[o + 2];
+    } else {
+      accOut[o] = scale[o] * psOut[o];
+      accOut[o + 1] = scale[o + 1] * psOut[o + 1];
+      accOut[o + 2] = scale[o + 2] * psOut[o + 2];
+    }
+  }
+}
+
 export interface AnimationTrack {
   startFrame: number;
   frames: Float32Array;
@@ -93,7 +138,7 @@ export interface AnimationTrack {
   interpolation: Uint8Array;
 }
 
-/** Match render.c sample_key, including its guarded Hermite fallback. */
+/** Match the C reference key sampler, including its guarded Hermite fallback. */
 export function sampleTrack(track: AnimationTrack, frame: number): number {
   const count = track.frames.length;
   if (!count) return 0;
@@ -174,6 +219,8 @@ export class PoseEvaluator {
   private readonly baseScale: Float32Array;
   private readonly baseRotation: Float32Array;
   private readonly baseTranslation: Float32Array;
+  private readonly sscParentScale: Float32Array;
+  private readonly sscAccumulated: Float32Array;
   private readonly worldState: Uint8Array;
 
   constructor(readonly model: ModelAsset, readonly animations: AnimationsAsset) {
@@ -183,12 +230,15 @@ export class PoseEvaluator {
     this.baseScale = new Float32Array(model.boneCount * 3);
     this.baseRotation = new Float32Array(model.boneCount * 3);
     this.baseTranslation = new Float32Array(model.boneCount * 3);
+    this.sscParentScale = new Float32Array(model.boneCount * 3);
+    this.sscAccumulated = new Float32Array(model.boneCount * 3);
     this.worldState = new Uint8Array(model.boneCount);
     for (let bone = 0; bone < model.boneCount; bone++) {
       const parent = model.boneParents[bone];
       if (parent !== 0xffff && parent >= model.boneCount) throw new Error(`model: bone ${bone} has invalid parent ${parent}`);
       decomposeBase(model, bone, this.baseScale, this.baseRotation, this.baseTranslation);
     }
+    computeParentScale(model, this.baseScale, this.sscParentScale, this.sscAccumulated);
     this.result = {
       boneRows: new Float32Array(model.boneCount * BONE_TEXTURE_FLOATS),
       requestedAction: 0xffffffff, resolvedAction: null, actionName: null, fallback: false,
@@ -265,6 +315,7 @@ export class PoseEvaluator {
     this.worldState[bone] = 1;
     const parent = this.model.boneParents[bone];
     const offset = bone * MATRIX_FLOATS;
+    applyMayaSsc(this.local, offset, this.sscParentScale, bone * 3);
     if (parent === 0xffff) {
       for (let index = 0; index < MATRIX_FLOATS; index++) this.world[offset + index] = this.local[offset + index];
     } else {
@@ -316,6 +367,8 @@ interface StagePoseScratch {
   scale: Float32Array;
   rotation: Float32Array;
   translation: Float32Array;
+  sscParentScale: Float32Array;
+  sscAccumulated: Float32Array;
   state: Uint8Array;
 }
 
@@ -332,6 +385,8 @@ function acquireStagePoseScratch(boneCount: number): StagePoseScratch {
     scale: new Float32Array(boneCount * 3),
     rotation: new Float32Array(boneCount * 3),
     translation: new Float32Array(boneCount * 3),
+    sscParentScale: new Float32Array(boneCount * 3),
+    sscAccumulated: new Float32Array(boneCount * 3),
     state: new Uint8Array(boneCount),
   };
   return stagePoseScratch;
@@ -354,9 +409,10 @@ export function evaluateStageAnim(
 ): Float32Array {
   const rows = output ?? new Float32Array(model.boneCount * BONE_TEXTURE_FLOATS);
   const scratch = acquireStagePoseScratch(model.boneCount);
-  const { local, world, skin, scale, rotation, translation, state } = scratch;
+  const { local, world, skin, scale, rotation, translation, sscParentScale, sscAccumulated, state } = scratch;
   local.set(model.boneBase);
   for (let bone = 0; bone < model.boneCount; bone++) decomposeBase(model, bone, scale, rotation, translation);
+  computeParentScale(model, scale, sscParentScale, sscAccumulated);
   if (action?.joints.length) {
     let t = frame < 0 ? 0 : frame;
     if (action.loop && action.endFrame > 0) t -= Math.floor(t / action.endFrame) * action.endFrame;
@@ -388,6 +444,7 @@ export function evaluateStageAnim(
     state[bone] = 1;
     const parent = model.boneParents[bone];
     const offset = bone * MATRIX_FLOATS;
+    applyMayaSsc(local, offset, sscParentScale, bone * 3);
     if (parent === 0xffff) {
       for (let index = 0; index < MATRIX_FLOATS; index++) world[offset + index] = local[offset + index];
     } else {
@@ -416,9 +473,10 @@ export function evaluateStagePose(
 ): Float32Array {
   const rows = output ?? new Float32Array(model.boneCount * BONE_TEXTURE_FLOATS);
   const scratch = acquireStagePoseScratch(model.boneCount);
-  const { local, world, skin, scale, rotation, translation, state } = scratch;
+  const { local, world, skin, scale, rotation, translation, sscParentScale, sscAccumulated, state } = scratch;
   local.set(model.boneBase);
   for (let bone = 0; bone < model.boneCount; bone++) decomposeBase(model, bone, scale, rotation, translation);
+  computeParentScale(model, scale, sscParentScale, sscAccumulated);
   for (const [bone, offset] of boneOffsets) {
     if (bone < 0 || bone >= model.boneCount) continue;
     const base = bone * 3;
@@ -435,6 +493,7 @@ export function evaluateStagePose(
     state[bone] = 1;
     const parent = model.boneParents[bone];
     const offset = bone * MATRIX_FLOATS;
+    applyMayaSsc(local, offset, sscParentScale, bone * 3);
     if (parent === 0xffff) {
       for (let index = 0; index < MATRIX_FLOATS; index++) world[offset + index] = local[offset + index];
     } else {

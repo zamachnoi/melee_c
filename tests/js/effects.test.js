@@ -81,7 +81,7 @@ test('effect catalog maps gfx aliases and item kinds onto extracted files', () =
   assert.equal(catalog.aliases.shine, 'ef-fx-0.model');
   assert.equal(catalog.items['54'], 'it-54.model');
   assert.equal(catalog.gfx['3000'], 'ef-fx-0.model');
-  assert.equal(effectAssetUrl(catalog.aliases.shield), '/assets/v4/models/ef-co-11.model?v=shield-mirror');
+  assert.equal(effectAssetUrl(catalog.aliases.shield), '/assets/v5/effects/ef-co-11.model?v=shield-mirror');
   assert.equal(parseEffectCatalog({
     schema: 4, aliases: { bad: '../secret.model' }, items: {}, gfx: {},
   }).aliases.bad, undefined);
@@ -99,7 +99,7 @@ test('extracted DAT meshes scale to gameplay radii unless they are already close
 });
 
 test('extracted shield is the in-game DAT billboard with a circular bubble texture', () => {
-  const bytes = fs.readFileSync('fixtures/cache/ef-co-11.model');
+  const bytes = fs.readFileSync('fixtures/cache/v5/effects/ef-co-11.model');
   const model = parseModel(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   assert.equal(model.vertexCount, 4);
   assert.equal(model.indexCount, 6);

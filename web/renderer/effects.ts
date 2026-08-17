@@ -118,7 +118,7 @@ export function parseEffectCatalog(value: unknown): EffectCatalog {
 }
 
 export function effectAssetUrl(file: string): string {
-  return `/assets/v4/models/${file}?v=shield-mirror`;
+  return `/assets/v5/effects/${file}?v=shield-mirror`;
 }
 
 export const EFFECT_ALIAS_KEYS = [

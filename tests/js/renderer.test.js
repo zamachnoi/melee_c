@@ -28,7 +28,7 @@ function layers(stageId, stage, layer) {
 }
 
 test('bind-pose transform reproduces the C FD section visibility rule', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const stage = parseStage(arrayBuffer('fixtures/cache/v5/stages/fd.stage'));
   assert.deepEqual(stage.sections.map(isAcceptedFdSection), [false, false, false, true, false, false, false, false, false, false]);
   const bounds = positionBounds(transformBindPose(stage.sections[3]));
   assert.ok(Math.abs(bounds[0] - -85.6) < 0.2);
@@ -38,37 +38,37 @@ test('bind-pose transform reproduces the C FD section visibility rule', () => {
 });
 
 test('decomp map_id tables pick playable geometry for the six legal stages', () => {
-  const bf = parseStage(arrayBuffer('cache/grnba.stage'));
+  const bf = parseStage(arrayBuffer('cache/v5/stages/grnba.stage'));
   assert.deepEqual(layers(31, bf, 'playable'), [6], 'Battlefield OnInit spawns gobj 6 as the platform');
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fod = parseStage(arrayBuffer('cache/v5/stages/griz.stage'));
   assert.deepEqual(layers(2, fod, 'playable'), [2, 3, 4], 'FoD keeps platforms and fountain');
-  const ys = parseStage(arrayBuffer('cache/grst.stage'));
+  const ys = parseStage(arrayBuffer('cache/v5/stages/grst.stage'));
   assert.deepEqual(layers(8, ys, 'playable'), [2, 3], "Yoshi's Story keeps Randall (2) and the island (3)");
 });
 
-test('decomp map_id tables pick backgrounds the game actually spawns', () => {
-  const bf = parseStage(arrayBuffer('cache/grnba.stage'));
+test('generic section classification picks stage backgrounds', () => {
+  const bf = parseStage(arrayBuffer('cache/v5/stages/grnba.stage'));
   const bfBg = layers(31, bf, 'background');
-  assert.ok(bfBg.includes(1), 'Battlefield draws gobj 1');
-  assert.ok(!bfBg.includes(2) && !bfBg.includes(3) && !bfBg.includes(4) && !bfBg.includes(5),
-    'Battlefield does not spawn gobjs 2/4/5; gobj 3 starts hidden');
-  const fd = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  assert.ok(bfBg.includes(1), 'Battlefield draws the gobj 1 skybox');
+  assert.ok(!bfBg.includes(6) && layers(31, bf, 'playable').includes(6),
+    'Battlefield keeps gobj 6 as the playable platform');
+  const fd = parseStage(arrayBuffer('fixtures/cache/v5/stages/fd.stage'));
   assert.deepEqual(layers(32, fd, 'background'), [4, 5, 6, 7, 8, 9], 'FD space skybox is map_ids 4–9');
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fod = parseStage(arrayBuffer('cache/v5/stages/griz.stage'));
   assert.ok(layers(2, fod, 'background').includes(1), 'FoD keeps the castle/sky backdrop');
-  const ys = parseStage(arrayBuffer('cache/grst.stage'));
+  const ys = parseStage(arrayBuffer('cache/v5/stages/grst.stage'));
   assert.deepEqual(layers(8, ys, 'background'), [1], "Yoshi's Story skybox is map_id 1");
-  const dl = parseStage(arrayBuffer('cache/grop.stage'));
+  const dl = parseStage(arrayBuffer('cache/v5/stages/grop.stage'));
   assert.ok(layers(28, dl, 'background').includes(3), "Dream Land's painted sky is map_id 3");
   assert.ok(!layers(28, dl, 'playable').includes(3));
   assert.ok(layers(28, dl, 'playable').includes(4) && layers(28, dl, 'playable').includes(5));
 });
 
 test('Pokemon Stadium transformation archives occupy distinct map slots', () => {
-  const fire = parseStage(arrayBuffer('cache/grps1.stage'));
-  const grass = parseStage(arrayBuffer('cache/grps2.stage'));
-  const water = parseStage(arrayBuffer('cache/grps3.stage'));
-  const rock = parseStage(arrayBuffer('cache/grps4.stage'));
+  const fire = parseStage(arrayBuffer('cache/v5/stages/grps1.stage'));
+  const grass = parseStage(arrayBuffer('cache/v5/stages/grps2.stage'));
+  const water = parseStage(arrayBuffer('cache/v5/stages/grps3.stage'));
+  const rock = parseStage(arrayBuffer('cache/v5/stages/grps4.stage'));
   assert.ok(fire.sections[3].vertexCount > 0);
   assert.ok(grass.sections[4].vertexCount > 0);
   assert.ok(rock.sections[6].vertexCount > 0);
@@ -84,7 +84,7 @@ function boneWorldY(section, posed, bone) {
 }
 
 test('FoD platform pose puts mesh tops at the world-space replay height', () => {
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fod = parseStage(arrayBuffer('cache/v5/stages/griz.stage'));
   assert.equal(fod.scale, 0.75);
   const leftHeight = 16.125;
   const rightHeight = 22.125;
@@ -105,8 +105,8 @@ test('FoD platform pose puts mesh tops at the world-space replay height', () => 
 });
 
 test("Randall's AnimJoint clip moves Yoshi's Story map_id 2", () => {
-  const ys = parseStage(arrayBuffer('cache/grst.stage'));
-  const anims = parseAnimations(arrayBuffer('cache/grst.anims'));
+  const ys = parseStage(arrayBuffer('cache/v5/stages/grst.stage'));
+  const anims = parseAnimations(arrayBuffer('cache/v5/stages/grst.anims'));
   const randall = ys.sections[2];
   const clip = anims.actions[2];
   assert.ok(randall.vertexCount > 0, 'Randall mesh is present');
@@ -121,7 +121,7 @@ test("Randall's AnimJoint clip moves Yoshi's Story map_id 2", () => {
 });
 
 test('stage pose evaluation can fill a reused bone-row buffer', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const stage = parseStage(arrayBuffer('fixtures/cache/v5/stages/fd.stage'));
   const section = stage.sections.find(value => value.boneCount > 1) ?? stage.sections[0];
   const rows = evaluateStagePose(section, new Map());
   const again = evaluateStagePose(section, new Map([[0, 4]]), rows);
@@ -133,7 +133,7 @@ test('stage pose evaluation can fill a reused bone-row buffer', () => {
 });
 
 test('melee camera uses the authored FD stage height, angle, and zoom', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const stage = parseStage(arrayBuffer('fixtures/cache/v5/stages/fd.stage'));
   const viewport = { width: 960, height: 720 };
   const mapped = meleeStageCamera(viewport, stage);
   assert.equal(mapped.fov, 30);

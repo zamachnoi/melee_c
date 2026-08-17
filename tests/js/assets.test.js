@@ -11,12 +11,12 @@ const arrayBuffer = path => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-test('schema-4 Falco records match the C asset fixture', () => {
-  const model = parseModel(arrayBuffer('fixtures/cache/falco-2.model'));
-  assert.equal(model.schema, 4);
+test('schema-5 Falco records match the C asset fixture', () => {
+  const model = parseModel(arrayBuffer('fixtures/cache/v5/characters/falco/falco-2.model'));
+  assert.equal(model.schema, 5);
   assert.equal(model.boneCount, 67);
   assert.ok(model.vertexCount > 0);
-  const animations = parseAnimations(arrayBuffer('fixtures/cache/falco-0.anims'));
+  const animations = parseAnimations(arrayBuffer('fixtures/cache/v5/characters/falco/falco-0.anims'));
   const wait = animations.actions.find(action => action.name.includes('ACTION_Wait1_figatree'));
   assert.ok(wait);
   const bone = wait.joints.find(joint => joint.boneIndex === 3);
@@ -26,16 +26,16 @@ test('schema-4 Falco records match the C asset fixture', () => {
   assert.ok(Math.abs(z.values[0] - -0.0028076172) < 0.0001);
 });
 
-test('schema-4 FD stage matches the C asset fixture', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
-  assert.equal(stage.schema, 4);
+test('schema-5 FD stage matches the C asset fixture', () => {
+  const stage = parseStage(arrayBuffer('fixtures/cache/v5/stages/fd.stage'));
+  assert.equal(stage.schema, 5);
   assert.equal(stage.sections.length, 10);
   assert.ok(stage.scale > 0);
   assert.ok(stage.cameraPosition[2] > 0);
 });
 
 test('asset parsers reject truncation and oversized counts', () => {
-  const source = arrayBuffer('fixtures/cache/falco-2.model');
+  const source = arrayBuffer('fixtures/cache/v5/characters/falco/falco-2.model');
   assert.throws(() => parseModel(source.slice(0, 20)), /truncated binary/);
   const oversized = source.slice(0, 32);
   new DataView(oversized).setUint32(8, 0xffffffff, false);

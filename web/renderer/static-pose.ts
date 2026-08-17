@@ -1,22 +1,65 @@
 import type { ModelAsset } from '../assets/model.js';
+import type { AnimationsAsset } from '../assets/anims.js';
 import { applyAffine, MATRIX_FLOATS, multiplyAffine } from '../animation/pose.js';
 
-/** Match render.c's bind-pose rigid/weighted vertex rules once at upload time. */
+const JOBJ_CLASSICAL_SCALE = 1 << 3;
+
+/** HSD Maya static scale compensation (matches animation/pose.ts). */
+function applyMayaSsc(matrix: Float32Array, offset: number, ps: Float32Array, psOffset: number): void {
+  const ps0 = ps[psOffset], ps1 = ps[psOffset + 1], ps2 = ps[psOffset + 2];
+  matrix[offset + 1] *= ps0 / ps1;
+  matrix[offset + 2] *= ps0 / ps2;
+  matrix[offset + 3] *= ps1 / ps0;
+  matrix[offset + 5] *= ps1 / ps2;
+  matrix[offset + 6] *= ps2 / ps0;
+  matrix[offset + 7] *= ps2 / ps1;
+}
+
+/** Transform the bind pose to world once at upload time. */
 export function transformBindPose(model: ModelAsset): Float32Array {
   const world = new Float32Array(model.boneCount * MATRIX_FLOATS);
+  const local = new Float32Array(model.boneCount * MATRIX_FLOATS);
   const state = new Uint8Array(model.boneCount);
+  const scale = new Float32Array(model.boneCount * 3);
+  const sscPs = new Float32Array(model.boneCount * 3);
+  const sscAcc = new Float32Array(model.boneCount * 3);
+  const columnScale = (o: number, c: number): number =>
+    Math.hypot(model.boneBase[o + c * 3], model.boneBase[o + c * 3 + 1], model.boneBase[o + c * 3 + 2]);
+  for (let bone = 0; bone < model.boneCount; bone++) {
+    const o = bone * MATRIX_FLOATS;
+    const so = bone * 3;
+    scale[so] = columnScale(o, 0);
+    scale[so + 1] = columnScale(o, 1);
+    scale[so + 2] = columnScale(o, 2);
+    const parent = model.boneParents[bone];
+    if (parent === 0xffff) {
+      sscPs[so] = 1; sscPs[so + 1] = 1; sscPs[so + 2] = 1;
+    } else {
+      const po = parent * 3;
+      sscPs[so] = sscAcc[po]; sscPs[so + 1] = sscAcc[po + 1]; sscPs[so + 2] = sscAcc[po + 2];
+    }
+    if (model.boneFlags[bone] & JOBJ_CLASSICAL_SCALE) {
+      sscAcc[so] = sscPs[so]; sscAcc[so + 1] = sscPs[so + 1]; sscAcc[so + 2] = sscPs[so + 2];
+    } else {
+      sscAcc[so] = scale[so] * sscPs[so];
+      sscAcc[so + 1] = scale[so + 1] * sscPs[so + 1];
+      sscAcc[so + 2] = scale[so + 2] * sscPs[so + 2];
+    }
+  }
   const evaluate = (bone: number): void => {
     if (state[bone] === 2) return;
     if (state[bone] === 1) throw new Error(`model: bone cycle at ${bone}`);
     state[bone] = 1;
     const parent = model.boneParents[bone];
     const offset = bone * MATRIX_FLOATS;
-    if (parent === 0xffff) {
-      world.set(model.boneBase.subarray(offset, offset + MATRIX_FLOATS), offset);
-    } else {
+    local.set(model.boneBase.subarray(offset, offset + MATRIX_FLOATS), offset);
+    applyMayaSsc(local, offset, sscPs, bone * 3);
+    if (parent !== 0xffff) {
       if (parent >= model.boneCount) throw new Error(`model: bone ${bone} has invalid parent ${parent}`);
       evaluate(parent);
-      multiplyAffine(world, parent * MATRIX_FLOATS, model.boneBase, offset, world, offset);
+      multiplyAffine(world, parent * MATRIX_FLOATS, local, offset, world, offset);
+    } else {
+      for (let index = 0; index < MATRIX_FLOATS; index++) world[offset + index] = local[offset + index];
     }
     state[bone] = 2;
   };
@@ -84,57 +127,24 @@ export function isAcceptedFdSection(model: ModelAsset): boolean {
 
 export type StageSectionLayer = 'skip' | 'background' | 'playable';
 
-interface MapRole {
-  layer: StageSectionLayer;
-  anim: boolean;
-}
+const JOBJ_HIDDEN = 1 << 4;
 
-const SKIP: MapRole = { layer: 'skip', anim: false };
-const BG_ANIM: MapRole = { layer: 'background', anim: true };
-const STAGE: MapRole = { layer: 'playable', anim: false };
-const STAGE_ANIM: MapRole = { layer: 'playable', anim: true };
-
-/** Per-map_id roles from each legal stage's OnInit / StageCallbacks.
-    Index is map_head model-group index (Ground_GetStageGObj id). */
-const STAGE_MAPS: Record<number, readonly MapRole[]> = {
-  /* Fountain of Dreams (grizumi.c): OnInit 0, 1, 3; gobj 3 then spawns 2 and 4.
-     2/3 platform heights come from replay events, not AnimJoint. */
-  2: [BG_ANIM, BG_ANIM, STAGE, STAGE, STAGE],
-  /* Pokemon Stadium (grpstadium.c): OnInit 0, PsType_Display=1, 2. */
-  3: [SKIP, BG_ANIM, STAGE_ANIM],
-  /* Yoshi's Story (grstory.c): OnInit 0, 1, 3, 2.  1 = skybox, 2 = Randall. */
-  8: [SKIP, BG_ANIM, STAGE_ANIM, STAGE],
-  /* Dream Land 64 (groldpupupu.c): OnInit 0, 3, 7, 5, 4, 6, 1, 8.  2 = hidden Whispy. */
-  28: [BG_ANIM, BG_ANIM, SKIP, BG_ANIM, STAGE_ANIM, STAGE_ANIM, BG_ANIM, STAGE_ANIM, STAGE],
-  /* Battlefield (grbattle.c): OnInit 0, 3, 1, 6.  Gobj 3 starts JOBJ_HIDDEN. */
-  31: [BG_ANIM, BG_ANIM, SKIP, SKIP, SKIP, SKIP, STAGE_ANIM],
-  /* Final Destination (grlast.c): OnInit 0, 1, 2, 3; 4–9 are space skybox layers. */
-  32: [SKIP, STAGE_ANIM, STAGE_ANIM, STAGE, BG_ANIM, BG_ANIM, BG_ANIM, BG_ANIM, BG_ANIM, BG_ANIM],
-};
-
-function heuristicLayer(model: ModelAsset): StageSectionLayer {
+/** Which draw list a map_head section belongs to, decided generically by
+    geometry rather than a per-stage spawn table (noclip renders every gobj;
+    this only splits skybox/backdrop planes from the playable arena for draw
+    order).  Sections whose root JOBJ starts hidden are skipped entirely. */
+export function classifyStageSection(stageId: number, mapId: number, model: ModelAsset): StageSectionLayer {
+  if (!model.vertexCount) return 'skip';
+  if (model.boneCount && (model.boneFlags[0] & JOBJ_HIDDEN)) return 'skip';
   if (isStageSection(model)) return 'playable';
   if (isBackgroundSection(model)) return 'background';
   return 'skip';
 }
 
-function mapRole(stageId: number, mapId: number): MapRole | null {
-  const table = STAGE_MAPS[stageId];
-  if (!table) return null;
-  return table[mapId] ?? SKIP;
-}
-
-/** Which draw list a map_head section belongs to.  Known stages use decomp
-    spawn tables; anything else falls back to the size heuristic. */
-export function classifyStageSection(stageId: number, mapId: number, model: ModelAsset): StageSectionLayer {
-  if (!model.vertexCount) return 'skip';
-  const role = mapRole(stageId, mapId);
-  return role ? role.layer : heuristicLayer(model);
-}
-
-/** True when the stage callback attaches AnimJoint clip 0 (`grAnime_801C8138`). */
-export function stageMapAnimates(stageId: number, mapId: number): boolean {
-  return mapRole(stageId, mapId)?.anim === true;
+/** A stage section animates when its map_head AnimJoint clip decodes to real
+    joint tracks.  noclip plays every gobj's anim[0], so we do the same. */
+export function stageMapAnimates(action: AnimationsAsset['actions'][number] | undefined): boolean {
+  return Boolean(action?.joints.length);
 }
 
 /** A stage section that belongs to the playable arena rather than the skybox.
