@@ -7,7 +7,8 @@ import {
   applyGameplayCamera, blendGameplayCamera, cameraViewAxes, cameraViewProjection, createCameraState, fitCameraToBounds,
   gameplayCameraTarget, meleeStageCamera, panCamera, screenToWorld, zoomCameraAt,
 } from '../../web/dist/renderer/camera.js';
-import { isAcceptedFdSection, positionBounds, transformBindPose } from '../../web/dist/renderer/static-pose.js';
+import { isAcceptedFdSection, isStageSection, positionBounds, transformBindPose } from '../../web/dist/renderer/static-pose.js';
+import { evaluateStagePose, skinPositions } from '../../web/dist/animation/pose.js';
 
 function arrayBuffer(path) {
   const bytes = fs.readFileSync(path);
@@ -29,6 +30,29 @@ test('bind-pose transform reproduces the C FD section visibility rule', () => {
   assert.ok(Math.abs(bounds[1] - -139.3) < 0.2);
   assert.ok(Math.abs(bounds[3] - 85.6) < 0.2);
   assert.ok(Math.abs(bounds[4]) < 0.1);
+});
+
+test('stage section filter keeps playable platforms and drops skybox domes', () => {
+  const bf = parseStage(arrayBuffer('cache/grnba.stage'));
+  const accepted = bf.sections.map((section, index) => isStageSection(section) ? index : null).filter(x => x !== null);
+  assert.deepEqual(accepted, [6], 'Battlefield renders only its platform, not the giant background domes');
+  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fodAccepted = fod.sections.map((section, index) => isStageSection(section) ? index : null).filter(x => x !== null);
+  assert.deepEqual(fodAccepted, [2, 3, 4], 'FoD renders platforms and fountain, dropping the background dome');
+});
+
+test('FoD platform pose moves bone 2/3 to the recorded fod height', () => {
+  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const section = fod.sections[2];
+  const boneRows = evaluateStagePose(section, new Map([[2, 20 + 1.5], [3, 35 + 1.5]]));
+  const posed = skinPositions(section, boneRows);
+  const ys = [];
+  for (let vertex = 0; vertex < section.vertexCount; vertex++) {
+    if (section.boneIndices[vertex * 4] === 2) ys.push(posed[vertex * 3 + 1]);
+  }
+  assert.ok(ys.length > 0);
+  assert.ok(Math.abs(Math.min(...ys) - 18.5) < 0.1);
+  assert.ok(Math.abs(Math.max(...ys) - 21.5) < 0.1);
 });
 
 test('melee camera uses the authored FD stage height, angle, and zoom', () => {

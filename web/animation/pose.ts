@@ -302,3 +302,56 @@ export function skinPositions(model: ModelAsset, boneRows: Float32Array, output 
   }
   return output;
 }
+
+export const STAGE_BONE_FLOATS = BONE_TEXTURE_FLOATS;
+
+/** Bind-pose bone rows for a stage section, with per-bone world Y offsets.
+    Fountain of Dreams' two moving platforms live on bones 2/3 of section 2;
+    the recorded fodLeft/fodRight heights are their Y positions, so each frame
+    we translate those bones and re-pack world + skin rows. */
+export function evaluateStagePose(
+  model: ModelAsset, boneOffsets: ReadonlyMap<number, number>, output?: Float32Array,
+): Float32Array {
+  const rows = output ?? new Float32Array(model.boneCount * BONE_TEXTURE_FLOATS);
+  const local = new Float32Array(model.boneCount * MATRIX_FLOATS);
+  local.set(model.boneBase);
+  const scale = new Float32Array(model.boneCount * 3);
+  const rotation = new Float32Array(model.boneCount * 3);
+  const translation = new Float32Array(model.boneCount * 3);
+  for (let bone = 0; bone < model.boneCount; bone++) decomposeBase(model, bone, scale, rotation, translation);
+  for (const [bone, offset] of boneOffsets) {
+    if (bone < 0 || bone >= model.boneCount) continue;
+    const base = bone * 3;
+    const o = bone * MATRIX_FLOATS;
+    matrixFromSrt(scale[base], scale[base + 1], scale[base + 2],
+      rotation[base], rotation[base + 1], rotation[base + 2],
+      translation[base], translation[base + 1] + offset, translation[base + 2],
+      local, o);
+  }
+  const world = new Float32Array(model.boneCount * MATRIX_FLOATS);
+  const skin = new Float32Array(MATRIX_FLOATS);
+  const state = new Uint8Array(model.boneCount);
+  const evaluateWorldBone = (bone: number): void => {
+    if (state[bone] === 2) return;
+    if (state[bone] === 1) return;
+    state[bone] = 1;
+    const parent = model.boneParents[bone];
+    const offset = bone * MATRIX_FLOATS;
+    if (parent === 0xffff) {
+      for (let index = 0; index < MATRIX_FLOATS; index++) world[offset + index] = local[offset + index];
+    } else {
+      evaluateWorldBone(parent);
+      multiplyAffine(world, parent * MATRIX_FLOATS, local, offset, world, offset);
+    }
+    state[bone] = 2;
+  };
+  for (let bone = 0; bone < model.boneCount; bone++) evaluateWorldBone(bone);
+  for (let bone = 0; bone < model.boneCount; bone++) {
+    const matrixOffset = bone * MATRIX_FLOATS;
+    const textureOffset = bone * BONE_TEXTURE_FLOATS;
+    packRows(world, matrixOffset, rows, textureOffset);
+    multiplyAffine(world, matrixOffset, model.boneInverseWorld, matrixOffset, skin, 0);
+    packRows(skin, 0, rows, textureOffset + MATRIX_FLOATS);
+  }
+  return rows;
+}

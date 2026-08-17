@@ -107,9 +107,10 @@ Measured on 2026-08-17 in Chromium:
 - Shields use gfx 11's in-game billboard: the I4 quadrant is mirrored into a
   full circle and multiplied by the IA8 bubble lighting, then port-tinted and
   scaled to remaining shield size.
-- FoD, Whispy, and Stadium records drive persistent proxy indicators. Moving
-  stage geometry is not yet deformed because the supplied fixtures contain
-  Final Destination and no dynamic-stage events.
+- FoD's two moving platforms are the actual stage-section meshes, re-posed to
+  the recorded `fodLeft`/`fodRight` heights each frame.  Whispy and Stadium
+  records still drive persistent proxy indicators; their stage geometry is not
+  yet deformed because the supplied fixtures contain no dynamic-stage events.
 - Transparent model content remains ordered at primitive-group granularity;
   the C reference sorts individual triangles.
 - Lighting does not emulate the full TEV pipeline, and the HUD is intentionally

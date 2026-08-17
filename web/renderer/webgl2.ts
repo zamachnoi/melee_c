@@ -278,6 +278,12 @@ export interface WebGLSceneSource {
   itemStart: number;
   itemEnd: number;
   stageState: DynamicStageState;
+  /** Skinned stage sections (e.g. FoD's moving platforms) driven per frame. */
+  stageAnimated?: readonly {
+    model: ModelAsset;
+    boneRows: Float32Array;
+    poseVersion: number;
+  }[];
   effectModels?: EffectModelBank;
 }
 
@@ -417,6 +423,7 @@ export class WebGL2Renderer implements Renderer {
   private overlayPointVertices = 0;
   private overlayTruncatedValue = false;
   private stageMeshes: GpuMesh[] = [];
+  private stageAnimatedMeshes: GpuMesh[] = [];
   private fighterMeshes: GpuMesh[] = [];
   private extractedMeshes = new Map<string, GpuMesh>();
   private source: WebGLSceneSource = {
@@ -579,6 +586,8 @@ export class WebGL2Renderer implements Renderer {
     this.destroyMeshes();
     try {
       this.stageMeshes = source.stageSections.map(model => this.uploadMesh(model, false));
+      this.stageAnimatedMeshes = (source.stageAnimated ?? []).map(
+        entry => this.uploadMesh(entry.model, true));
       this.fighterMeshes = source.fighters.map(fighter => this.uploadMesh(fighter.model, true));
       const bank = source.effectModels;
       if (bank) {
@@ -624,6 +633,17 @@ export class WebGL2Renderer implements Renderer {
     for (const mesh of this.stageMeshes) {
       this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
     }
+    const animatedStages = this.source.stageAnimated ?? [];
+    for (let index = 0; index < this.stageAnimatedMeshes.length; index++) {
+      const mesh = this.stageAnimatedMeshes[index];
+      const entry = animatedStages[index];
+      if (!entry) continue;
+      if (mesh.uploadedPoseVersion !== entry.poseVersion) {
+        this.uploadBoneRows(mesh, entry.boneRows);
+        mesh.uploadedPoseVersion = entry.poseVersion;
+      }
+      this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, { skinnedStage: true });
+    }
     for (let index = 0; index < this.fighterMeshes.length; index++) {
       const mesh = this.fighterMeshes[index];
       const fighter = this.source.fighters[index];
@@ -641,6 +661,7 @@ export class WebGL2Renderer implements Renderer {
 
   get gpuBytes(): number {
     return this.stageMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
+      + this.stageAnimatedMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
       + this.fighterMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
       + [...this.extractedMeshes.values()].reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
       + this.overlayData.byteLength
@@ -731,7 +752,7 @@ export class WebGL2Renderer implements Renderer {
   private drawMesh(
     mesh: GpuMesh, camera: CameraState, profile: boolean,
     rootX: number, rootY: number, facing: number, modelScale: number,
-    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number] },
+    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; skinnedStage?: boolean },
   ): void {
     if (!this.programs || !this.whiteTexture) return;
     const gl = this.gl;
@@ -743,7 +764,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(u.facing, facing < 0 ? -1 : 1);
     gl.uniform1f(u.modelScale, modelScale);
     gl.uniform1i(u.profile, profile ? 1 : 0);
-    gl.uniform1i(u.skinned, profile ? 1 : 0);
+    gl.uniform1i(u.skinned, profile || extra?.skinnedStage ? 1 : 0);
     gl.uniform1i(u.billboard, extra?.billboard ? 1 : 0);
     gl.uniform1i(u.ray, extra?.ray ? 1 : 0);
     gl.uniform1i(u.viewBillboard, extra?.viewBillboard ? 1 : 0);
@@ -1150,9 +1171,11 @@ export class WebGL2Renderer implements Renderer {
 
   private destroyMeshes(): void {
     for (const mesh of this.stageMeshes) this.deleteMesh(mesh);
+    for (const mesh of this.stageAnimatedMeshes) this.deleteMesh(mesh);
     for (const mesh of this.fighterMeshes) this.deleteMesh(mesh);
     for (const mesh of this.extractedMeshes.values()) this.deleteMesh(mesh);
     this.stageMeshes = [];
+    this.stageAnimatedMeshes = [];
     this.fighterMeshes = [];
     this.extractedMeshes.clear();
   }

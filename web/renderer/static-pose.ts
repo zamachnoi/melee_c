@@ -81,3 +81,17 @@ export function isAcceptedFdSection(model: ModelAsset): boolean {
   const bounds = positionBounds(transformBindPose(model));
   return bounds[0] >= -100 && bounds[3] <= 100 && bounds[4] <= 5 && bounds[4] - bounds[1] >= 1;
 }
+
+/** A stage section that belongs to the playable arena rather than the skybox.
+    Keeps platform/structure sections (like Battlefield sec 6, FoD's platforms)
+    and drops the huge background domes that surround every stage. */
+export function isStageSection(model: ModelAsset): boolean {
+  if (!model.vertexCount) return false;
+  const bounds = positionBounds(transformBindPose(model));
+  const width = bounds[3] - bounds[0];
+  const height = bounds[4] - bounds[1];
+  const depth = bounds[5] - bounds[2];
+  if (height < 1) return false;                       /* flat overlapping passes */
+  if (width > 320 || depth > 320) return false;       /* skybox domes           */
+  return Math.abs(bounds[0]) <= 160 && Math.abs(bounds[3]) <= 160;
+}

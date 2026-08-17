@@ -505,10 +505,11 @@ static int stage_section_visible(const asset_model_t *section,
                                  float bounds[4]) {
     if (render_pose_bounds(section, NULL, UINT32_MAX, 0, bounds) != 0)
         return 0;
-    /* The remaining sections are camera-facing 3D sky domes. */
-    if (bounds[0] < -100.0f || bounds[2] > 100.0f || bounds[3] > 5.0f)
-        return 0;
-    /* Skip the two flat, overlapping top-surface material passes. */
+    /* The remaining sections are camera-facing 3D sky domes surrounding the
+       stage.  Keep playable platform/structure geometry and drop them. */
+    if (bounds[0] < -160.0f || bounds[2] > 160.0f) return 0;
+    if (bounds[2] - bounds[0] > 320.0f) return 0;
+    /* Skip the flat, overlapping top-surface material passes. */
     return bounds[3] - bounds[1] >= 1.0f;
 }
 

@@ -1,7 +1,7 @@
 import { parseAnimations, type AnimationsAsset } from './assets/anims.js';
 import { parseModel, type ModelAsset } from './assets/model.js';
 import { parseStage, type StageAsset } from './assets/stage.js';
-import { PoseEvaluator, type PoseEvaluation } from './animation/pose.js';
+import { PoseEvaluator, evaluateStagePose, type PoseEvaluation } from './animation/pose.js';
 import { ReplayClock } from './replay/clock.js';
 import { ReplaySceneIndex } from './replay/scene.js';
 import { parseTimeline, type Timeline } from './replay/timeline.js';
@@ -12,7 +12,7 @@ import {
   panCamera, zoomCameraAt,
   type CameraMode, type CameraState, type CameraSubject, type CameraViewport,
 } from './renderer/camera.js';
-import { isAcceptedFdSection } from './renderer/static-pose.js';
+import { isStageSection } from './renderer/static-pose.js';
 import {
   EFFECT_ALIAS_KEYS, effectAssetUrl, parseEffectCatalog,
   type EffectCatalog, type EffectModelBank,
@@ -338,6 +338,50 @@ export async function bootWebGL2(): Promise<void> {
 
   const renderCurrent = (): void => { renderer.draw(camera); };
 
+  /* Fountain of Dreams: the two moving platforms are bones 2/3 of stage
+     section 2.  The replay records their Y per frame (fodLeft/fodRight), so
+     we re-pose that section's bones and let the renderer skin it. */
+  const FOD_PLATFORM_LEFT_BONE = 2;
+  const FOD_PLATFORM_RIGHT_BONE = 3;
+  let fodStageEntry: { model: ModelAsset; boneRows: Float32Array; poseVersion: number } | null = null;
+  let lastFodLeft = Number.NaN;
+  let lastFodRight = Number.NaN;
+
+  const setupFodPlatforms = (
+    sceneSource: WebGLSceneSource, sections: readonly ModelAsset[],
+  ): void => {
+    fodStageEntry = null;
+    lastFodLeft = Number.NaN;
+    lastFodRight = Number.NaN;
+    if (!timeline || timeline.stageId !== 2) return;
+    const section = sections[2];
+    if (!section || !section.vertexCount) return;
+    /* The platform section is skinned per frame, so remove it from the static
+       list to avoid drawing it twice. */
+    sceneSource.stageSections = sceneSource.stageSections.filter(
+      candidate => candidate !== section);
+    const boneRows = evaluateStagePose(section, new Map());
+    fodStageEntry = { model: section, boneRows, poseVersion: 0 };
+    sceneSource.stageAnimated = [fodStageEntry];
+  };
+
+  const updateFodPlatforms = (
+    sceneSource: WebGLSceneSource, fodLeft: number, fodRight: number,
+  ): void => {
+    if (!fodStageEntry) return;
+    const changed = fodLeft !== lastFodLeft || fodRight !== lastFodRight;
+    lastFodLeft = fodLeft;
+    lastFodRight = fodRight;
+    if (!changed) return;
+    const offsets = new Map<number, number>();
+    /* The platform meshes sit at y=-1.5 in bind pose; the replay height is
+       their absolute Y. */
+    if (Number.isFinite(fodLeft)) offsets.set(FOD_PLATFORM_LEFT_BONE, fodLeft + 1.5);
+    if (Number.isFinite(fodRight)) offsets.set(FOD_PLATFORM_RIGHT_BONE, fodRight + 1.5);
+    evaluateStagePose(fodStageEntry.model, offsets, fodStageEntry.boneRows);
+    fodStageEntry.poseVersion += 1;
+  };
+
   const updateDebug = (index: number): void => {
     if (!debugVisible || !timeline) return;
     let text = `frame ${frame} | items ${currentItemCount} | stage FoD ${source.stageState.fodLeft}/${source.stageState.fodRight}`;
@@ -400,6 +444,7 @@ export async function bootWebGL2(): Promise<void> {
     source.stageState.whispyDirection = sceneIndex.whispyDirection[index];
     source.stageState.stadiumEvent = sceneIndex.stadiumEvent[index];
     source.stageState.stadiumType = sceneIndex.stadiumType[index];
+    updateFodPlatforms(source, sceneIndex.fodLeft[index], sceneIndex.fodRight[index]);
     applyAutomaticCamera(index);
     renderCurrent();
     const workElapsed = performance.now() - workStarted;
@@ -644,9 +689,7 @@ export async function bootWebGL2(): Promise<void> {
       if (loadedStage) {
         stageScale = loadedStage.asset.scale;
         stageCameraSource = loadedStage.asset;
-        stageSections = manifest.stageName === 'Final Destination'
-          ? loadedStage.asset.sections.filter(isAcceptedFdSection)
-          : loadedStage.asset.sections;
+        stageSections = loadedStage.asset.sections.filter(isStageSection);
         if (!stageSections.length) assetWarnings.push(`no visible stage sections for ${manifest.stageName}`);
       } else {
         stageCameraSource = null;
@@ -656,6 +699,7 @@ export async function bootWebGL2(): Promise<void> {
         stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
         effectModels: effectResult.bank,
       };
+      setupFodPlatforms(source, loadedStage?.asset.sections ?? []);
       renderer.setScene(source);
       buildHud();
       const slotParameter = new URLSearchParams(location.search).get('slot');
