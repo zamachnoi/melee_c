@@ -33,7 +33,7 @@ uniform bool u_viewBillboard;
 uniform vec3 u_cameraRight;
 uniform vec3 u_cameraUp;
 uniform vec2 u_dir;
-uniform highp sampler2D u_boneMatrices;
+uniform sampler2D u_boneMatrices;
 
 out vec2 v_uv;
 out vec4 v_color;
@@ -293,6 +293,44 @@ export interface RendererCapabilities {
   maxVertexTextureUnits: number;
   maxVertexAttributes: number;
   floatTexture: boolean;
+  boneInternalFormat: number;
+}
+
+const WEBGL2_CONTEXT_ATTRIBUTES: WebGLContextAttributes[] = [
+  {
+    alpha: false, antialias: false, depth: true, premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+  },
+  { alpha: false, depth: true },
+];
+
+function createWebGL2Context(canvas: HTMLCanvasElement): WebGL2RenderingContext {
+  for (const attributes of WEBGL2_CONTEXT_ATTRIBUTES) {
+    const gl = canvas.getContext('webgl2', attributes);
+    if (gl) return gl;
+  }
+  const gl = canvas.getContext('webgl2');
+  if (gl) return gl;
+  throw new Error('WebGL2 is unavailable. Open /?renderer=software for the C viewer.');
+}
+
+function configureFloatTexture(gl: WebGL2RenderingContext, texture: WebGLTexture): void {
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+
+function probeFloatInternalFormat(gl: WebGL2RenderingContext, internalFormat: number): boolean {
+  const probe = gl.createTexture();
+  if (!probe) return false;
+  configureFloatTexture(gl, probe);
+  while (gl.getError() !== gl.NO_ERROR) { /* clear stale context errors */ }
+  gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, 1, 1, 0, gl.RGBA, gl.FLOAT, new Float32Array(4));
+  const ok = gl.getError() === gl.NO_ERROR;
+  gl.deleteTexture(probe);
+  return ok;
 }
 
 interface MeshUniforms {
@@ -446,12 +484,7 @@ export class WebGL2Renderer implements Renderer {
   constructor(canvas: HTMLCanvasElement, status: (message: string) => void = () => undefined) {
     this.canvas = canvas;
     this.status = status;
-    const gl = canvas.getContext('webgl2', {
-      alpha: false, antialias: false, depth: true, premultipliedAlpha: false,
-      preserveDrawingBuffer: false, powerPreference: 'high-performance',
-    });
-    if (!gl) throw new Error('WebGL2 is unavailable. Open /?renderer=software for the C viewer.');
-    this.gl = gl;
+    this.gl = createWebGL2Context(canvas);
     this.capabilities = this.checkCapabilities();
     this.handleLost = (event: Event) => {
       event.preventDefault();
@@ -480,21 +513,25 @@ export class WebGL2Renderer implements Renderer {
 
   private checkCapabilities(): RendererCapabilities {
     const gl = this.gl;
+    gl.getExtension('EXT_color_buffer_float');
+    gl.getExtension('EXT_color_buffer_half_float');
+    gl.getExtension('OES_texture_float_linear');
     const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
     const maxVertexTextureUnits = gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS) as number;
     const maxVertexAttributes = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) as number;
     if (maxTextureSize < 2048 || maxVertexTextureUnits < 1 || maxVertexAttributes < 8) {
       throw new Error(`WebGL2 capability gate failed (texture ${maxTextureSize}, vertex textures ${maxVertexTextureUnits}, attributes ${maxVertexAttributes})`);
     }
-    const probe = gl.createTexture();
-    if (!probe) throw new Error('WebGL2 capability gate could not allocate a float texture');
-    gl.bindTexture(gl.TEXTURE_2D, probe);
-    while (gl.getError() !== gl.NO_ERROR) { /* clear stale context errors */ }
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, new Float32Array(4));
-    const floatTexture = gl.getError() === gl.NO_ERROR;
-    gl.deleteTexture(probe);
-    if (!floatTexture) throw new Error('WebGL2 capability gate failed: RGBA32F textures are unavailable');
-    return { maxTextureSize, maxVertexTextureUnits, maxVertexAttributes, floatTexture };
+    const boneInternalFormat = probeFloatInternalFormat(gl, gl.RGBA32F) ? gl.RGBA32F
+      : probeFloatInternalFormat(gl, gl.RGBA16F) ? gl.RGBA16F
+      : 0;
+    if (!boneInternalFormat) {
+      throw new Error('WebGL2 capability gate failed: float bone textures are unavailable. Open /?renderer=software for the C viewer.');
+    }
+    return {
+      maxTextureSize, maxVertexTextureUnits, maxVertexAttributes,
+      floatTexture: true, boneInternalFormat,
+    };
   }
 
   initialize(): void {
@@ -807,12 +844,10 @@ export class WebGL2Renderer implements Renderer {
     }
     const texture = gl.createTexture();
     if (!texture) throw new Error('WebGL2 could not allocate a bone texture');
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 6, boneCount, 0, gl.RGBA, gl.FLOAT, null);
+    configureFloatTexture(gl, texture);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, this.capabilities.boneInternalFormat, 6, boneCount, 0, gl.RGBA, gl.FLOAT, null,
+    );
     return texture;
   }
 

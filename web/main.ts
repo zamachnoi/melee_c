@@ -870,7 +870,14 @@ export async function bootWebGL2(): Promise<void> {
 if (typeof document !== 'undefined' && document.documentElement.dataset.renderer === 'webgl2') {
   void bootWebGL2().catch(error => {
     const status = document.getElementById('status');
-    if (status) { status.classList.add('error'); status.textContent = errorMessage(error); }
+    const message = errorMessage(error);
+    if (status) { status.classList.add('error'); status.textContent = message; }
     console.error(error);
+    const url = new URL(location.href);
+    if (url.searchParams.get('renderer') === 'software') return;
+    if (/WebGL2/.test(message)) {
+      url.searchParams.set('renderer', 'software');
+      location.replace(url.toString());
+    }
   });
 }
