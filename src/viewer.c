@@ -302,12 +302,18 @@ static const char *stage_asset_slug(uint16_t stage) {
     }
 }
 
-/* Load the stage asset for a replay's stage id, if present on disk. */
+/* Load the stage asset for a replay's stage id, if present on disk.
+   Stages are stored under the schema-versioned $ASSET_DIR/v5/stages/
+   directory (same place the /assets/v5/... HTTP handler serves from).
+   Reading the flat $ASSET_DIR root would pick up stale schema-4 files on
+   hosts whose fixtures predate the v5 layout; asset_stage_load exits on a
+   schema mismatch, crashing the whole process mid-request. */
 static asset_stage_t *load_replay_stage(uint16_t stage) {
     const char *slug = stage_asset_slug(stage);
     if (!slug) return NULL;
     char path[512];
-    snprintf(path, sizeof path, "%s/%s.stage", asset_dir(), slug);
+    snprintf(path, sizeof path, "%s/v5/stages/%s.stage", asset_dir(), slug);
+    if (access(path, R_OK) != 0) return NULL; /* missing stage: degrade to no stage camera */
     return asset_stage_load(path);
 }
 
@@ -763,7 +769,10 @@ static void handle_replay_manifest(int cfd, const char *req, const char *id) {
         };
         for (size_t i = 0; i < sizeof variants / sizeof variants[0]; i++) {
             char stage_path[512];
-            snprintf(stage_path, sizeof stage_path, "%s/%s.stage",
+            /* Check the schema-versioned location the /assets/v5/ handler
+               actually serves from; a flat $ASSET_DIR file may be a stale,
+               pre-v5 leftover that would never be served. */
+            snprintf(stage_path, sizeof stage_path, "%s/v5/stages/%s.stage",
                      asset_dir(), variants[i].slug);
             if (access(stage_path, R_OK) != 0) continue;
             o += (size_t)snprintf(json + o, sizeof json - o,
