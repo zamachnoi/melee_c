@@ -8,14 +8,19 @@ expected_id="$(extract_tool --print-cache-id)"
 need_cache=0
 if [ "${FORCE_CACHE_REBUILD:-}" = "1" ]; then
     need_cache=1
-elif [ ! -f "$asset_dir/meta.json" ] || \
-     ! grep -q ",\"cache_id\":${expected_id}}" "$asset_dir/meta.json" 2>/dev/null || \
-     [ ! -f "$asset_dir/grnla.anims" ] || \
-     [ ! -f "$asset_dir/effects.json" ] || \
+elif [ ! -f "$asset_dir/v5/meta.json" ] || \
+     ! grep -q ",\"cache_id\":${expected_id}}" "$asset_dir/v5/meta.json" 2>/dev/null || \
+     [ ! -f "$asset_dir/v5/stages/grnla.anims" ] || \
+     [ ! -f "$asset_dir/v5/effects.json" ] || \
      [ ! -f "$asset_dir/icons/falco-0.png" ]; then
-    # Persistent /data/replays/cache survives deploys. Sentinel files from an
-    # older --all pass (falco.model, grnla.stage, schema 4) are not enough:
-    # new extract outputs 404 until cache_id matches ASSET_CACHE_ID.
+    # Persistent /data/replays/cache survives deploys, so we only rebuild when
+    # the on-disk cache is genuinely missing or stale.
+    #
+    # extract_tool --all writes the schema-versioned cache UNDER $asset_dir/v5/
+    # (meta.json, effects.json, stages/...), with stock icons in $asset_dir/icons/.
+    # Earlier versions wrote these files flat at $asset_dir/ root (schema 4); any
+    # cache in that old layout is invalid for the current ASSET_SCHEMA_VERSION, so
+    # a missing/mismatched $asset_dir/v5/meta.json forces a full rebuild.
     need_cache=1
 fi
 
