@@ -15,9 +15,24 @@ export function stadiumFieldType(event: number, type: number, previous: number):
 export const FOD_STAGE_ID = 2;
 export const FOD_LEFT_START = 16.125;
 export const FOD_RIGHT_START = 22.125;
+export const FOD_STAGE_SCALE = 0.75;
+/** DAT platform box is 3 units tall; half of that after grGroundParam. */
+export const FOD_PLATFORM_HALF_WORLD = 1.5 * FOD_STAGE_SCALE;
 
 function fodHeight(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : Number.NaN;
+}
+
+/**
+ * Slippi 0x3F spawn records (and our seed) are already gameplay mesh-top Y
+ * (16.125 / 22.125). Later 0x3F values are HSD_JObj translate Y before the
+ * 0.75 stage scale — the walkable top is `y * 0.75 + 1.125`.
+ */
+export function fodReplayHeightToWorldTop(height: number): number {
+  const value = fodHeight(height);
+  if (Number.isNaN(value)) return value;
+  if (value === FOD_LEFT_START || value === FOD_RIGHT_START) return value;
+  return value * FOD_STAGE_SCALE + FOD_PLATFORM_HALF_WORLD;
 }
 
 function fillFrameRanges<T extends { frame: number }>(
@@ -85,12 +100,12 @@ export class ReplaySceneIndex {
         const value = timeline.stageEvents[event];
         if (value.kind === STAGE_EVENT_FOD) {
           /* Slippi 0x3F: platform 0 = right, 1 = left. */
+          const raw = timeline.stageId === FOD_STAGE_ID
+            ? fodReplayHeightToWorldTop(value.value0) : fodHeight(value.value0);
           if (value.index === 0) {
-            const height = fodHeight(value.value0);
-            if (!Number.isNaN(height)) right = height;
+            if (!Number.isNaN(raw)) right = raw;
           } else if (value.index === 1) {
-            const height = fodHeight(value.value0);
-            if (!Number.isNaN(height)) left = height;
+            if (!Number.isNaN(raw)) left = raw;
           }
         } else if (value.kind === STAGE_EVENT_WHISPY) whispy = value.value0;
         else if (value.kind === STAGE_EVENT_STADIUM) {

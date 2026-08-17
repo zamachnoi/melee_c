@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { ReplaySceneIndex, stadiumFieldType } from '../../web/dist/replay/scene.js';
+import {
+  ReplaySceneIndex, stadiumFieldType, fodReplayHeightToWorldTop,
+  FOD_LEFT_START, FOD_RIGHT_START,
+} from '../../web/dist/replay/scene.js';
 import { parseTimeline } from '../../web/dist/replay/timeline.js';
 
 const bytes = readFileSync('build/timeline-golden.bin');
@@ -77,6 +80,28 @@ test('FoD stage seeds spawn heights and ignores a height-0 frame-0 event', () =>
   assert.equal(scene.fodRight[at(-123)], 22.125);
   assert.equal(scene.fodLeft[at(0)], 16.125);
   assert.equal(scene.fodRight[at(0)], 22.125);
-  assert.equal(scene.fodRight[at(10)], 25);
+  assert.equal(scene.fodRight[at(10)], fodReplayHeightToWorldTop(25));
   assert.equal(scene.fodLeft[at(10)], 16.125);
+});
+
+test('FoD 0x3F spawn records are world tops; motion records are JObj local Y', () => {
+  assert.equal(fodReplayHeightToWorldTop(FOD_LEFT_START), 16.125);
+  assert.equal(fodReplayHeightToWorldTop(FOD_RIGHT_START), 22.125);
+  assert.equal(fodReplayHeightToWorldTop(20), 16.125);
+  assert.equal(fodReplayHeightToWorldTop(28), 22.125);
+  const moved = fodReplayHeightToWorldTop(26.814117431640625);
+  assert.ok(Math.abs(moved - 21.23558807373047) < 1e-5);
+  const scene = new ReplaySceneIndex({
+    stageId: 2,
+    startFrame: -123,
+    frameCount: 200,
+    items: [],
+    stageEvents: [
+      { frame: -123, kind: 1, index: 1, value0: 16.125, value1: 0 },
+      { frame: 10, kind: 1, index: 1, value0: 26.814117431640625, value1: 0 },
+    ],
+  });
+  const at = (frame) => frame - (-123);
+  assert.equal(scene.fodLeft[at(-123)], 16.125);
+  assert.equal(scene.fodLeft[at(10)], moved);
 });
