@@ -54,8 +54,14 @@ interface FighterRuntime {
 interface HudEntry {
   root: HTMLDivElement;
   title: HTMLSpanElement;
-  state: HTMLSpanElement;
-  lastText: string;
+  character: HTMLSpanElement;
+  percent: HTMLSpanElement;
+  stockPips: HTMLImageElement[];
+  costume: number;
+  lastPercent: number;
+  lastStocks: number;
+  lastCharacter: number;
+  lastHeat: string;
   lastAbsent: boolean;
   lastUnavailable: boolean;
 }
@@ -69,6 +75,39 @@ function element<T extends HTMLElement>(id: string): T {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const CHARACTER_NAMES = [
+  'Mario', 'Fox', 'Captain Falcon', 'Donkey Kong', 'Kirby', 'Bowser', 'Link', 'Sheik',
+  'Ness', 'Peach', 'Popo', 'Nana', 'Pikachu', 'Samus', 'Yoshi', 'Jigglypuff',
+  'Mewtwo', 'Luigi', 'Marth', 'Zelda', 'Young Link', 'Dr. Mario', 'Falco', 'Pichu',
+  'Mr. Game & Watch', 'Ganondorf', 'Roy',
+];
+
+const CHARACTER_SLUGS = [
+  'mario', 'fox', 'captain_falcon', 'donkey_kong', 'kirby', 'bowser', 'link', 'sheik',
+  'ness', 'peach', 'popo', 'nana', 'pikachu', 'samus', 'yoshi', 'jigglypuff',
+  'mewtwo', 'luigi', 'marth', 'zelda', 'young_link', 'dr_mario', 'falco', 'pichu',
+  'mr_game_and_watch', 'ganondorf', 'roy',
+];
+
+function characterName(id: number): string {
+  return CHARACTER_NAMES[id] ?? `Char ${id}`;
+}
+
+function stockIconUrl(characterId: number, costume: number): string {
+  const slug = CHARACTER_SLUGS[characterId];
+  return slug ? `/assets/v4/icons/${slug}-${costume}.png` : '';
+}
+
+function formatTimecode(frame: number): string {
+  const sign = frame < 0 ? '-' : '';
+  const totalSeconds = Math.floor(Math.abs(frame) / 60);
+  return `${sign}${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
+}
+
+function percentHeat(percent: number): string {
+  return percent >= 150 ? 'kill' : percent >= 100 ? 'high' : percent >= 50 ? 'mid' : '';
 }
 
 function actionLabels(animations: AnimationsAsset): string[] {
@@ -142,7 +181,6 @@ export async function bootWebGL2(): Promise<void> {
   let sceneIndex: ReplaySceneIndex | null = null;
   let manifest: ReplayManifest | null = null;
   let runtimes: FighterRuntime[] = [];
-  let runtimeBySlot: Array<FighterRuntime | null> = Array(8).fill(null) as Array<FighterRuntime | null>;
   let hudEntries: HudEntry[] = [];
   let clock: ReplayClock | null = null;
   let source: WebGLSceneSource = {
@@ -276,8 +314,6 @@ export async function bootWebGL2(): Promise<void> {
     viewportSize.width = Math.max(1, rect.width);
     viewportSize.height = Math.max(1, rect.height);
   };
-
-  const selectedSlot = (): number => followSlot;
 
   const cameraSubjects = (index: number, slotIndex?: number): CameraSubject[] => {
     cameraSubjectList.length = 0;
@@ -479,16 +515,13 @@ export async function bootWebGL2(): Promise<void> {
 
   const updateFrameLabel = (): void => {
     if (!timeline) return;
-    const selected = runtimeBySlot[selectedSlot()];
-    const pose = selected?.pose;
-    const resolvedAction = pose?.resolvedAction ?? null;
-    const action = !selected?.source ? 'asset unavailable'
-      : resolvedAction === null ? (selected.animated ? 'bind' : 'bind-only')
-        : (selected.actionLabels[resolvedAction] ?? 'unknown');
-    const mapping = pose?.fallback ? ` · ${pose.requestedAction}→${resolvedAction ?? 'bind'}` : '';
-    const text = `frame ${frame} · ${action}${mapping}`;
+    const text = `${formatTimecode(frame)} / ${formatTimecode(timeline.endFrame)}`;
     if (frameLabel.textContent !== text) frameLabel.textContent = text;
     if (frameSlider.valueAsNumber !== frame) frameSlider.value = String(frame);
+    const span = timeline.endFrame - timeline.startFrame;
+    const progress = span <= 0 ? 0 : ((frame - timeline.startFrame) / span) * 100;
+    frameSlider.style.setProperty('--progress', `${progress}%`);
+    frameSlider.setAttribute('aria-valuetext', `frame ${frame}`);
   };
 
   const updateFrame = (nextFrame: number, updateLabel = true): void => {
@@ -527,12 +560,31 @@ export async function bootWebGL2(): Promise<void> {
           hudEntry.root.classList.toggle('unavailable', unavailable);
           hudEntry.lastUnavailable = unavailable;
         }
-        const text = fighter
-          ? `${Math.round(slot.percent[index])}% · ×${slot.stocks[index]}`
-          : 'asset unavailable';
-        if (hudEntry.lastText !== text) {
-          hudEntry.state.textContent = text;
-          hudEntry.lastText = text;
+        const characterId = slot.character[index];
+        if (hudEntry.lastCharacter !== characterId) {
+          hudEntry.character.textContent = unavailable ? 'unavailable' : characterName(characterId);
+          const icon = unavailable ? '' : stockIconUrl(characterId, hudEntry.costume);
+          for (const pip of hudEntry.stockPips) {
+            if (icon) pip.src = icon;
+          }
+          hudEntry.lastCharacter = characterId;
+        }
+        const percent = Math.floor(slot.percent[index]);
+        if (hudEntry.lastPercent !== percent) {
+          hudEntry.percent.textContent = unavailable ? '—' : `${percent}%`;
+          hudEntry.lastPercent = percent;
+        }
+        const heat = unavailable ? '' : percentHeat(percent);
+        if (hudEntry.lastHeat !== heat) {
+          hudEntry.percent.className = heat ? `hud-percent ${heat}` : 'hud-percent';
+          hudEntry.lastHeat = heat;
+        }
+        const stocks = slot.stocks[index];
+        if (hudEntry.lastStocks !== stocks) {
+          for (let pip = 0; pip < hudEntry.stockPips.length; pip++) {
+            hudEntry.stockPips[pip].classList.toggle('lost', pip >= stocks);
+          }
+          hudEntry.lastStocks = stocks;
         }
       }
     }
@@ -560,8 +612,9 @@ export async function bootWebGL2(): Promise<void> {
   };
 
   const setPlayState = (playing: boolean): void => {
-    playButton.textContent = playing ? 'Pause' : 'Play';
+    playButton.classList.toggle('playing', playing);
     playButton.setAttribute('aria-pressed', String(playing));
+    playButton.setAttribute('aria-label', playing ? 'Pause' : 'Play');
   };
 
   const playbackTick = (now: number): void => {
@@ -667,9 +720,25 @@ export async function bootWebGL2(): Promise<void> {
   };
   canvas.addEventListener('dblclick', reset);
   resetCamera.addEventListener('click', reset);
+  const highlightFollow = (): void => {
+    for (let i = 0; i < hudEntries.length; i++) {
+      const following = preferredCameraMode === 'follow' && runtimes[i]?.slot === followSlot;
+      hudEntries[i].root.classList.toggle('following', following);
+    }
+  };
+
+  const followFighter = (slotIndex: number): void => {
+    followSlot = slotIndex;
+    preferredCameraMode = 'follow';
+    cameraModeSelect.value = 'follow';
+    camera.mode = 'follow';
+    reset();
+    highlightFollow();
+  };
+
   cameraModeSelect.addEventListener('change', () => {
     preferredCameraMode = cameraModeSelect.value as AutomaticCameraMode;
-    camera.mode = preferredCameraMode; reset();
+    camera.mode = preferredCameraMode; reset(); highlightFollow();
   });
   frameSlider.addEventListener('input', () => seek(Number(frameSlider.value)));
   playButton.addEventListener('click', togglePlayback);
@@ -694,29 +763,54 @@ export async function bootWebGL2(): Promise<void> {
     else if (/^Digit[1-4]$/.test(event.code) && timeline) {
       const port = Number(event.code.at(-1)) - 1;
       const slotIndex = timeline.slots.findIndex(slot => slot.active && !slot.follower && slot.port === port);
-      if (slotIndex >= 0) {
-        followSlot = slotIndex;
-        preferredCameraMode = 'follow'; cameraModeSelect.value = 'follow'; camera.mode = 'follow'; reset();
-      }
+      if (slotIndex >= 0) followFighter(slotIndex);
     }
   });
 
   const buildHud = (): void => {
     hudEntries = runtimes.map(runtime => {
-      const root = document.createElement('div');
-      const title = document.createElement('span');
-      const state = document.createElement('span');
-      root.className = 'hud-player'; root.dataset.slot = String(runtime.slot);
-      title.className = 'hud-name'; state.className = 'hud-state';
       const slot = timeline!.slots[runtime.slot];
       const player = timeline!.players.find(value => value.port === slot.port);
+      const root = document.createElement('div');
+      root.className = slot.follower ? 'hud-player follower' : 'hud-player';
+      root.dataset.slot = String(runtime.slot);
+      root.dataset.port = String(slot.port);
+      root.title = 'Follow this fighter';
+      const meta = document.createElement('div');
+      meta.className = 'hud-meta';
+      const title = document.createElement('span');
+      title.className = 'hud-name';
       title.textContent = `${player?.name || `P${slot.port + 1}`}${slot.follower ? ' · Nana' : ''}`;
-      root.append(title, state);
+      const character = document.createElement('span');
+      character.className = 'hud-char';
+      meta.append(title, character);
+      const percent = document.createElement('span');
+      percent.className = 'hud-percent';
+      percent.textContent = '0%';
+      const stocks = document.createElement('div');
+      stocks.className = 'hud-stocks';
+      const pipCount = Math.max(player?.startingStocks ?? 4, 1);
+      const costume = player?.costume ?? 0;
+      const stockPips = Array.from({ length: pipCount }, () => {
+        const pip = document.createElement('img');
+        pip.className = 'hud-stock';
+        pip.alt = '';
+        pip.decoding = 'async';
+        pip.addEventListener('error', () => pip.classList.add('missing'));
+        pip.addEventListener('load', () => pip.classList.remove('missing'));
+        return pip;
+      });
+      stocks.append(...stockPips);
+      root.append(meta, percent, stocks);
+      root.addEventListener('click', () => followFighter(runtime.slot));
       return {
-        root, title, state, lastText: '', lastAbsent: false, lastUnavailable: false,
+        root, title, character, percent, stockPips, costume,
+        lastPercent: Number.NaN, lastStocks: -1, lastCharacter: -1, lastHeat: '',
+        lastAbsent: false, lastUnavailable: false,
       };
     });
     hud.replaceChildren(...hudEntries.map(entry => entry.root));
+    highlightFollow();
   };
 
   const loadReplay = async (id: string): Promise<void> => {
@@ -779,8 +873,6 @@ export async function bootWebGL2(): Promise<void> {
           warning: loaded.animations ? null : loaded.warnings.join('; ') || 'animations unavailable; using bind pose',
         };
       });
-      runtimeBySlot = Array(8).fill(null) as Array<FighterRuntime | null>;
-      for (const runtime of runtimes) runtimeBySlot[runtime.slot] = runtime;
       const fighters = runtimes.flatMap(runtime => runtime.source ? [runtime.source] : []);
       let stageSections: readonly ModelAsset[] = [];
       let stageScale = 1;
@@ -805,6 +897,7 @@ export async function bootWebGL2(): Promise<void> {
       const selected = runtimes.some(runtime => runtime.slot === requestedSlot)
         ? requestedSlot : (runtimes.find(runtime => !timeline!.slots[runtime.slot].follower)?.slot ?? runtimes[0]?.slot ?? 0);
       followSlot = selected;
+      highlightFollow();
       frameSlider.min = String(timeline.startFrame); frameSlider.max = String(timeline.endFrame);
       const frameParameter = new URLSearchParams(location.search).get('frame');
       const requestedFrame = frameParameter === null ? Number.NaN : Number(frameParameter);
@@ -814,7 +907,7 @@ export async function bootWebGL2(): Promise<void> {
       camera.mode = preferredCameraMode;
       lastCameraIndex = null;
       lastBlendMode = null;
-      sceneLabel.textContent = `${manifest.name} · ${fighters.length}/${fighterAssets.length} fighters · ${manifest.stageName} · complete local scene`;
+      sceneLabel.textContent = manifest.stageName;
       warningOverlay.textContent = assetWarnings.join('\n'); warningOverlay.hidden = assetWarnings.length === 0;
       document.title = `Melee WebGL2 — ${manifest.name}`;
       updateFrame(initialFrame);

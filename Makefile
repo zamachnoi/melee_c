@@ -33,7 +33,7 @@ $(BIN)/test_pose: tests/test_pose.c src/asset.c src/render.c
 
 $(BIN)/extract_tool: tools/extract/extract.c src/asset.h
 	@mkdir -p $(BIN)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm -lz
 
 $(BIN)/viewer: src/viewer.c src/parser.c src/asset.c src/render.c src/timeline.c src/sha256.c src/parser.h src/asset.h src/render.h src/timeline.h src/protocol.h src/sha256.h
 	@mkdir -p $(BIN)

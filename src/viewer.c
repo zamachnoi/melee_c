@@ -1773,12 +1773,15 @@ static void handle_asset(int cfd, const char *req, const char *path) {
         return;
     }
     const char *name = NULL, *ctype = NULL, *suffix = NULL;
+    int png_icon = 0;
     if (strncmp(relative, "models/", 7) == 0) {
         name = relative + 7; suffix = ".model"; ctype = "application/vnd.melee.model";
     } else if (strncmp(relative, "anims/", 6) == 0) {
         name = relative + 6; suffix = ".anims"; ctype = "application/vnd.melee.animations";
     } else if (strncmp(relative, "stages/", 7) == 0) {
         name = relative + 7; suffix = ".stage"; ctype = "application/vnd.melee.stage";
+    } else if (strncmp(relative, "icons/", 6) == 0) {
+        name = relative + 6; suffix = ".png"; ctype = "image/png"; png_icon = 1;
     }
     size_t name_len = name ? strlen(name) : 0, suffix_len = suffix ? strlen(suffix) : 0;
     if (!name || !safe_asset_name(name) || name_len <= suffix_len ||
@@ -1788,7 +1791,12 @@ static void handle_asset(int cfd, const char *req, const char *path) {
     char file_path[1400]; snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
     size_t len = 0; char *body = read_whole_file(file_path, &len);
     if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
-    if (len < 8 || (uint8_t)body[0] != 'M' || (uint8_t)body[1] != 'D' ||
+    if (png_icon) {
+        static const unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+        if (len < 8 || memcmp(body, sig, 8) != 0) {
+            free(body); send_error(cfd, 422, "Unprocessable Content", "invalid icon png"); return;
+        }
+    } else if (len < 8 || (uint8_t)body[0] != 'M' || (uint8_t)body[1] != 'D' ||
         (uint8_t)body[2] != 'L' || body[3] != 0 ||
         (uint8_t)body[4] != 0 || (uint8_t)body[5] != 0 ||
         (uint8_t)body[6] != 0 || (uint8_t)body[7] != ASSET_SCHEMA_VERSION) {
