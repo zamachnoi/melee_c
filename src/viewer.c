@@ -59,6 +59,12 @@
 #define ASSET_DIR "cache"
 #endif
 
+/* Safari ignores no-store on some cached GETs and 404s; be explicit. */
+#define HTTP_NO_STORE \
+    "Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n" \
+    "Pragma: no-cache\r\n" \
+    "Expires: 0\r\n"
+
 typedef struct {
     uint8_t r, g, b, a;
 } color_t;
@@ -782,6 +788,7 @@ static void send_response_headers(int cfd, int status, const char *reason,
                       "Content-Length: %zu\r\n"
                       "Connection: close\r\n"
                       "Access-Control-Allow-Origin: *\r\n"
+                      "X-Content-Type-Options: nosniff\r\n"
                       "%s"
                       "\r\n",
                       status, reason, ctype, len, headers ? headers : "");
@@ -791,13 +798,13 @@ static void send_response_headers(int cfd, int status, const char *reason,
 
 static void send_response(int cfd, const char *ctype, const void *body,
                           size_t len) {
-    send_response_headers(cfd, 200, "OK", ctype, NULL, body, len);
+    send_response_headers(cfd, 200, "OK", ctype, HTTP_NO_STORE, body, len);
 }
 
 static void send_error(int cfd, int status, const char *reason,
                        const char *message) {
     send_response_headers(cfd, status, reason, "text/plain; charset=utf-8",
-                          NULL, message, strlen(message));
+                          HTTP_NO_STORE, message, strlen(message));
 }
 
 /* Reads request headers into buf. Returns 0 on success. */
@@ -1758,7 +1765,7 @@ static void handle_create_replay(int cfd, size_t content_len,
                        "\"manifestUrl\":\"/api/replays/%s/manifest\"}",
                        id, escaped_name, id);
     send_response_headers(cfd, 201, "Created", "application/json",
-                          "Cache-Control: no-store\r\n", json, (size_t)len);
+                          HTTP_NO_STORE, json, (size_t)len);
 }
 
 static int safe_asset_name(const char *name) {
@@ -1790,22 +1797,38 @@ static void handle_asset(int cfd, const char *req, const char *path) {
         return;
     }
     const char *name = NULL, *ctype = NULL, *suffix = NULL;
+    int png_icon = 0;
     if (strncmp(relative, "models/", 7) == 0) {
         name = relative + 7; suffix = ".model"; ctype = "application/vnd.melee.model";
     } else if (strncmp(relative, "anims/", 6) == 0) {
         name = relative + 6; suffix = ".anims"; ctype = "application/vnd.melee.animations";
     } else if (strncmp(relative, "stages/", 7) == 0) {
         name = relative + 7; suffix = ".stage"; ctype = "application/vnd.melee.stage";
+    } else if (strncmp(relative, "icons/", 6) == 0) {
+        name = relative + 6; suffix = ".png"; ctype = "image/png"; png_icon = 1;
     }
     size_t name_len = name ? strlen(name) : 0, suffix_len = suffix ? strlen(suffix) : 0;
     if (!name || !safe_asset_name(name) || name_len <= suffix_len ||
         strcmp(name + name_len - suffix_len, suffix) != 0) {
         send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return;
     }
-    char file_path[1400]; snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
+    char file_path[1400];
+    if (png_icon)
+        snprintf(file_path, sizeof file_path, "%s/icons/%s", asset_dir(), name);
+    else
+        snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
     size_t len = 0; char *body = read_whole_file(file_path, &len);
+    if (!body && png_icon) {
+        snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
+        body = read_whole_file(file_path, &len);
+    }
     if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
-    if (len < 8 || (uint8_t)body[0] != 'M' || (uint8_t)body[1] != 'D' ||
+    if (png_icon) {
+        static const unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+        if (len < 8 || memcmp(body, sig, 8) != 0) {
+            free(body); send_error(cfd, 422, "Unprocessable Content", "invalid icon png"); return;
+        }
+    } else if (len < 8 || (uint8_t)body[0] != 'M' || (uint8_t)body[1] != 'D' ||
         (uint8_t)body[2] != 'L' || body[3] != 0 ||
         (uint8_t)body[4] != 0 || (uint8_t)body[5] != 0 ||
         (uint8_t)body[6] != 0 || (uint8_t)body[7] != ASSET_SCHEMA_VERSION) {
@@ -2006,6 +2029,38 @@ static char *read_whole_file(const char *path, size_t *len) {
     return buf;
 }
 
+/* Safari keeps a separate module cache for /main.js from the old
+   type=module page. Serve the IIFE bundle under a new URL and stamp a
+   content hash so a stale classic-script copy cannot be reused. */
+static char *with_viewer_script_hash(char *html, size_t *len) {
+    static const char needle[] = "src=\"/viewer.js\"";
+    char *at = strstr(html, needle);
+    if (!at) return html;
+    char js_path[1400];
+    snprintf(js_path, sizeof js_path, "%s/dist/main.js", g_web_dir);
+    uint8_t digest[32];
+    char hex[65];
+    if (sha256_file(js_path, digest) != 0) return html;
+    sha256_hex(digest, hex);
+    char replacement[80];
+    int n = snprintf(replacement, sizeof replacement,
+                     "src=\"/viewer.js?v=%.12s\"", hex);
+    if (n < 0) return html;
+    size_t needle_len = sizeof needle - 1;
+    size_t prefix = (size_t)(at - html);
+    size_t suffix_off = prefix + needle_len;
+    size_t suffix_len = *len - suffix_off;
+    size_t new_len = prefix + (size_t)n + suffix_len;
+    char *out = malloc(new_len + 1);
+    if (!out) return html;
+    memcpy(out, html, prefix);
+    memcpy(out + prefix, replacement, (size_t)n);
+    memcpy(out + prefix + (size_t)n, html + suffix_off, suffix_len);
+    out[new_len] = '\0';
+    *len = new_len;
+    return out;
+}
+
 /* Serves WebGL2 by default. The software viewer remains at ?renderer=software
    as the migration oracle. ?renderer=webgl2 is still accepted as an alias.
    This lets you edit the frontend and just refresh -- no rebuild needed. */
@@ -2019,8 +2074,12 @@ static void handle_root(int cfd, const char *query) {
     size_t len = 0;
     char *body = read_whole_file(path, &len);
     if (body) {
+        if (!software) {
+            char *stamped = with_viewer_script_hash(body, &len);
+            if (stamped != body) { free(body); body = stamped; }
+        }
         send_response_headers(cfd, 200, "OK", "text/html; charset=utf-8",
-                              "Cache-Control: no-store\r\n", body, len);
+                              HTTP_NO_STORE, body, len);
         free(body);
     } else if (software) {
         send_response(cfd, "text/html; charset=utf-8", html_doc,
@@ -2031,8 +2090,12 @@ static void handle_root(int cfd, const char *query) {
     }
 }
 
+static int web_bundle_path(const char *path) {
+    return strcmp(path, "/main.js") == 0 || strcmp(path, "/viewer.js") == 0;
+}
+
 static int web_module_path(const char *path) {
-    if (strcmp(path, "/main.js") != 0 &&
+    if (!web_bundle_path(path) &&
         strncmp(path, "/assets/", 8) != 0 &&
         strncmp(path, "/animation/", 11) != 0 &&
         strncmp(path, "/replay/", 8) != 0 &&
@@ -2052,13 +2115,14 @@ static void handle_web_module(int cfd, const char *path) {
         send_error(cfd, 404, "Not Found", "module is not allowlisted");
         return;
     }
+    const char *rel = web_bundle_path(path) ? "main.js" : path + 1;
     char file_path[1400];
-    snprintf(file_path, sizeof file_path, "%s/dist/%s", g_web_dir, path + 1);
+    snprintf(file_path, sizeof file_path, "%s/dist/%s", g_web_dir, rel);
     size_t len = 0;
     char *body = read_whole_file(file_path, &len);
     if (!body) { send_error(cfd, 404, "Not Found", "module not found"); return; }
     send_response_headers(cfd, 200, "OK", "text/javascript; charset=utf-8",
-                          "Cache-Control: no-store\r\n", body, len);
+                          HTTP_NO_STORE, body, len);
     free(body);
 }
 

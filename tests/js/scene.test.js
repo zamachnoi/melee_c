@@ -39,3 +39,44 @@ test('stadium field type ignores jumbotron preview events', () => {
   assert.equal(stadiumFieldType(5, 4, 3), 4);
   assert.equal(stadiumFieldType(0, 5, 4), 5);
 });
+
+test('FoD height holds last move and does not invent a frame-0 drop', () => {
+  const scene = new ReplaySceneIndex({
+    startFrame: -123,
+    frameCount: 400,
+    items: [],
+    stageEvents: [
+      { frame: 10, kind: 1, index: 0, value0: 25, value1: 0 },
+      { frame: 12, kind: 1, index: 1, value0: 18.5, value1: 0 },
+    ],
+  });
+  const at = (frame) => frame - (-123);
+  assert.ok(Number.isNaN(scene.fodRight[at(0)]));
+  assert.ok(Number.isNaN(scene.fodLeft[at(0)]));
+  assert.equal(scene.fodRight[at(10)], 25);
+  assert.equal(scene.fodRight[at(11)], 25);
+  assert.ok(Number.isNaN(scene.fodLeft[at(11)]));
+  assert.equal(scene.fodLeft[at(12)], 18.5);
+  assert.equal(scene.fodRight[at(200)], 25);
+  assert.equal(scene.fodLeft[at(200)], 18.5);
+});
+
+test('FoD stage seeds spawn heights and ignores a height-0 frame-0 event', () => {
+  const scene = new ReplaySceneIndex({
+    stageId: 2,
+    startFrame: -123,
+    frameCount: 400,
+    items: [],
+    stageEvents: [
+      { frame: 0, kind: 1, index: 0, value0: 0, value1: 0 },
+      { frame: 10, kind: 1, index: 0, value0: 25, value1: 0 },
+    ],
+  });
+  const at = (frame) => frame - (-123);
+  assert.equal(scene.fodLeft[at(-123)], 16.125);
+  assert.equal(scene.fodRight[at(-123)], 22.125);
+  assert.equal(scene.fodLeft[at(0)], 16.125);
+  assert.equal(scene.fodRight[at(0)], 22.125);
+  assert.equal(scene.fodRight[at(10)], 25);
+  assert.equal(scene.fodLeft[at(10)], 16.125);
+});

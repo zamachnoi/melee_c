@@ -1,5 +1,6 @@
 #include "parser.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -628,6 +629,86 @@ static slp_error_t stage_event_set(void **arr, size_t *count, size_t *cap,
     return SLP_OK;
 }
 
+static void fod_mark_empty(slp_fod_platform_t *arr, size_t from, size_t to) {
+    for (size_t i = from; i < to; i++) {
+        arr[i].frame_number = INT32_MIN;
+        arr[i].platform = (uint8_t)(i & 1);
+        arr[i].height = 0.f;
+    }
+}
+
+static void whispy_mark_empty(slp_whispy_blow_t *arr, size_t from, size_t to) {
+    for (size_t i = from; i < to; i++) {
+        arr[i].frame_number = INT32_MIN;
+        arr[i].direction = 0;
+    }
+}
+
+static void stadium_mark_empty(slp_stadium_transform_t *arr, size_t from,
+                               size_t to) {
+    for (size_t i = from; i < to; i++) {
+        arr[i].frame_number = INT32_MIN;
+        arr[i].event = 0;
+        arr[i].type = 0;
+    }
+}
+
+/* Hold the last recorded height/direction so lookups work on frames where
+   the stage did not emit a new 0x3F/0x40/0x41 event.  FoD 0x3F is sparse —
+   only on a height change — so seed the in-game spawn heights first; bind
+   pose is world y=0 and would sink the platforms into the fountain. */
+static void persist_stage_events(slp_replay_t *r) {
+    slp_fod_platform_t fod_last[2] = {0};
+    bool fod_have[2] = {false, false};
+    if (r->have_game_start && r->game_start.stage_id == SLP_FOD_STAGE_ID) {
+        fod_last[0] = (slp_fod_platform_t){
+            .frame_number = -SLP_FRAME_BASE,
+            .platform = 0,
+            .height = SLP_FOD_RIGHT_START,
+        };
+        fod_last[1] = (slp_fod_platform_t){
+            .frame_number = -SLP_FRAME_BASE,
+            .platform = 1,
+            .height = SLP_FOD_LEFT_START,
+        };
+        fod_have[0] = fod_have[1] = true;
+    }
+    for (size_t i = 0; i < r->fod_count; i++) {
+        unsigned platform = (unsigned)(i & 1);
+        slp_fod_platform_t *e = &r->fod[i];
+        if (e->frame_number != INT32_MIN && e->platform == platform) {
+            fod_last[platform] = *e;
+            fod_have[platform] = true;
+        } else if (fod_have[platform]) {
+            *e = fod_last[platform];
+        }
+    }
+
+    slp_whispy_blow_t whispy_last = {0};
+    bool whispy_have = false;
+    for (size_t i = 0; i < r->whispy_count; i++) {
+        slp_whispy_blow_t *e = &r->whispy[i];
+        if (e->frame_number != INT32_MIN) {
+            whispy_last = *e;
+            whispy_have = true;
+        } else if (whispy_have) {
+            *e = whispy_last;
+        }
+    }
+
+    slp_stadium_transform_t stadium_last = {0};
+    bool stadium_have = false;
+    for (size_t i = 0; i < r->stadium_count; i++) {
+        slp_stadium_transform_t *e = &r->stadium[i];
+        if (e->frame_number != INT32_MIN) {
+            stadium_last = *e;
+            stadium_have = true;
+        } else if (stadium_have) {
+            *e = stadium_last;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
@@ -717,6 +798,7 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
                 slp_fod_platform_t e_;
                 decode_fod(event, evlen, &e_);
                 size_t idx = frame_index(e_.frame_number) * 2 + e_.platform;
+                size_t old = out->fod_count;
                 err = stage_event_set((void **)&out->fod, &out->fod_count,
                                       &out->fod_cap, sizeof(slp_fod_platform_t),
                                       idx);
@@ -724,6 +806,7 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
                     failed = true;
                     break;
                 }
+                fod_mark_empty(out->fod, old, out->fod_count);
                 out->fod[idx] = e_;
                 break;
             }
@@ -731,6 +814,7 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
                 slp_whispy_blow_t e_;
                 decode_whispy(event, evlen, &e_);
                 size_t idx = frame_index(e_.frame_number);
+                size_t old = out->whispy_count;
                 err = stage_event_set((void **)&out->whispy,
                                       &out->whispy_count, &out->whispy_cap,
                                       sizeof(slp_whispy_blow_t), idx);
@@ -738,6 +822,7 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
                     failed = true;
                     break;
                 }
+                whispy_mark_empty(out->whispy, old, out->whispy_count);
                 out->whispy[idx] = e_;
                 break;
             }
@@ -745,6 +830,7 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
                 slp_stadium_transform_t e_;
                 decode_stadium(event, evlen, &e_);
                 size_t idx = frame_index(e_.frame_number);
+                size_t old = out->stadium_count;
                 err = stage_event_set((void **)&out->stadium,
                                       &out->stadium_count, &out->stadium_cap,
                                       sizeof(slp_stadium_transform_t), idx);
@@ -752,6 +838,7 @@ slp_error_t slp_parse(const uint8_t *data, size_t len, slp_replay_t *out) {
                     failed = true;
                     break;
                 }
+                stadium_mark_empty(out->stadium, old, out->stadium_count);
                 out->stadium[idx] = e_;
                 break;
             }
@@ -797,6 +884,7 @@ done:
             return e;
         }
     }
+    persist_stage_events(out);
     return SLP_OK;
 }
 
@@ -839,22 +927,44 @@ const slp_item_list_t *slp_items_at(const slp_replay_t *r,
 
 const slp_fod_platform_t *slp_fod_at(slp_replay_t *r, int32_t frame_number,
                                      unsigned platform) {
+    if (!r || !r->fod || platform > 1) return NULL;
     size_t idx = frame_index(frame_number) * 2 + platform;
-    if (idx >= r->fod_count) return NULL;
-    return &r->fod[idx];
+    if (idx >= r->fod_count) {
+        if (r->fod_count <= platform) return NULL;
+        idx = r->fod_count - 1;
+        if ((idx & 1) != platform) {
+            if (idx == 0) return NULL;
+            idx--;
+        }
+    }
+    const slp_fod_platform_t *e = &r->fod[idx];
+    if (e->frame_number == INT32_MIN || e->platform != platform) return NULL;
+    return e;
 }
 
 const slp_whispy_blow_t *slp_whispy_at(slp_replay_t *r, int32_t frame_number) {
+    if (!r || !r->whispy) return NULL;
     size_t idx = frame_index(frame_number);
-    if (idx >= r->whispy_count) return NULL;
-    return &r->whispy[idx];
+    if (idx >= r->whispy_count) {
+        if (!r->whispy_count) return NULL;
+        idx = r->whispy_count - 1;
+    }
+    const slp_whispy_blow_t *e = &r->whispy[idx];
+    if (e->frame_number == INT32_MIN) return NULL;
+    return e;
 }
 
 const slp_stadium_transform_t *slp_stadium_at(slp_replay_t *r,
                                               int32_t frame_number) {
+    if (!r || !r->stadium) return NULL;
     size_t idx = frame_index(frame_number);
-    if (idx >= r->stadium_count) return NULL;
-    return &r->stadium[idx];
+    if (idx >= r->stadium_count) {
+        if (!r->stadium_count) return NULL;
+        idx = r->stadium_count - 1;
+    }
+    const slp_stadium_transform_t *e = &r->stadium[idx];
+    if (e->frame_number == INT32_MIN) return NULL;
+    return e;
 }
 
 /* ------------------------------------------------------------------ */

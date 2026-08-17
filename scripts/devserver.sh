@@ -41,12 +41,10 @@ except OSError: sys.exit(1)" && return 1 || return 0
 }
 
 # --- build if needed -------------------------------------------------------
-if [ ! -x "$root/bin/viewer" ]; then
-    log "building viewer..."
-    # build the binary via the file target only (the phony `viewer` target
-    # RUNS the server and would block/conflict here)
-    (cd "$root" && make bin/viewer >&2)
-fi
+log "building viewer..."
+# Always run make so a stale bin/viewer cannot keep serving old parser code.
+# The file target is used (the phony `viewer` target would start the server).
+(cd "$root" && make bin/viewer >&2)
 
 # Compile strict TypeScript sources to native browser ES modules. Fresh
 # worktrees may not have local dependencies yet, so hydrate them from the lock

@@ -163,6 +163,22 @@ static size_t count_items(const slp_replay_t *r, int32_t start, int32_t end) {
     return count;
 }
 
+static int fod_event_on_frame(const slp_replay_t *r, int32_t fn,
+                              unsigned platform) {
+    const slp_fod_platform_t *f = slp_fod_at((slp_replay_t *)r, fn, platform);
+    return f && f->frame_number == fn && f->platform == platform;
+}
+
+static int fod_needs_spawn(const slp_replay_t *r, int32_t fn,
+                           unsigned platform) {
+    return r->have_game_start && r->game_start.stage_id == SLP_FOD_STAGE_ID &&
+           !fod_event_on_frame(r, fn, platform);
+}
+
+static float fod_spawn_height(unsigned platform) {
+    return platform == 0 ? SLP_FOD_RIGHT_START : SLP_FOD_LEFT_START;
+}
+
 static size_t count_stage_events(const slp_replay_t *r, int32_t start,
                                  int32_t end) {
     size_t count = 0;
@@ -173,7 +189,9 @@ static size_t count_stage_events(const slp_replay_t *r, int32_t start,
         const slp_stadium_transform_t *st =
             slp_stadium_at((slp_replay_t *)r, fn);
         if (f0 && f0->frame_number == fn && f0->platform == 0) count++;
+        else if (fn == start && fod_needs_spawn(r, start, 0)) count++;
         if (f1 && f1->frame_number == fn && f1->platform == 1) count++;
+        else if (fn == start && fod_needs_spawn(r, start, 1)) count++;
         if (wh && wh->frame_number == fn) count++;
         if (st && st->frame_number == fn) count++;
         if (fn == INT32_MAX) break;
@@ -290,8 +308,17 @@ int timeline_serialize(const slp_replay_t *r, int32_t start, int32_t end,
         for (unsigned platform = 0; platform < 2; platform++) {
             const slp_fod_platform_t *f = slp_fod_at((slp_replay_t *)r, fn,
                                                       platform);
+            float height = 0.f;
+            int write = 0;
             if (f && f->frame_number == fn && f->platform == platform) {
-                uint32_t bits; memcpy(&bits, &f->height, 4);
+                height = f->height;
+                write = 1;
+            } else if (fn == start && fod_needs_spawn(r, start, platform)) {
+                height = fod_spawn_height(platform);
+                write = 1;
+            }
+            if (write) {
+                uint32_t bits; memcpy(&bits, &height, 4);
                 write_stage_event(w.data + w.len, fn, TIMELINE_STAGE_FOD,
                                   (uint8_t)platform, bits, 0);
                 w.len += STAGE_EVENT_SIZE;

@@ -1,6 +1,9 @@
 # Builds the SLP debug viewer for Coolify/Docker deployment.
-# Data dir (/data/replays) is a volume so you can drop .slp files or upload
-# them from the browser.
+#
+# Coolify's Dockerfile build pack does not persist anonymous volumes.
+# Keep a named volume (see docker-compose.yaml) or a Coolify Persistent
+# Storage mount at /data/replays so uploads, game.iso, and cache survive
+# rebuilds. The VOLUME line below is only a hint for local `docker run`.
 
 FROM alpine:3.20 AS build
 RUN apk add --no-cache build-base zlib-dev zlib-static nodejs npm

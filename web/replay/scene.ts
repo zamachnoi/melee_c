@@ -11,6 +11,15 @@ export function stadiumFieldType(event: number, type: number, previous: number):
   return STADIUM_ON_FIELD_EVENTS.has(event) ? type : previous;
 }
 
+/** Fountain of Dreams stage id and in-game spawn heights.  0x3F is sparse. */
+export const FOD_STAGE_ID = 2;
+export const FOD_LEFT_START = 16.125;
+export const FOD_RIGHT_START = 22.125;
+
+function fodHeight(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : Number.NaN;
+}
+
 function fillFrameRanges<T extends { frame: number }>(
   records: readonly T[], startFrame: number, frameCount: number,
   starts: Uint32Array, ends: Uint32Array, label: string,
@@ -56,8 +65,10 @@ export class ReplaySceneIndex {
 
     this.fodLeft = new Float32Array(count);
     this.fodRight = new Float32Array(count);
-    this.fodLeft.fill(Number.NaN);
-    this.fodRight.fill(Number.NaN);
+    const seedLeft = timeline.stageId === FOD_STAGE_ID ? FOD_LEFT_START : Number.NaN;
+    const seedRight = timeline.stageId === FOD_STAGE_ID ? FOD_RIGHT_START : Number.NaN;
+    this.fodLeft.fill(seedLeft);
+    this.fodRight.fill(seedRight);
     this.whispyDirection = new Int8Array(count);
     this.stadiumEvent = new Int16Array(count);
     this.stadiumType = new Int16Array(count);
@@ -67,15 +78,20 @@ export class ReplaySceneIndex {
     this.stadiumType.fill(-1);
     this.stadiumVisibleType.fill(-1);
 
-    let left = Number.NaN, right = Number.NaN;
+    let left = seedLeft, right = seedRight;
     let whispy = -1, stadiumEvent = -1, stadiumType = -1, stadiumVisibleType = -1;
     for (let index = 0; index < count; index++) {
       for (let event = this.stageEventStarts[index]; event < this.stageEventEnds[index]; event++) {
         const value = timeline.stageEvents[event];
         if (value.kind === STAGE_EVENT_FOD) {
           /* Slippi 0x3F: platform 0 = right, 1 = left. */
-          if (value.index === 0) right = value.value0;
-          else if (value.index === 1) left = value.value0;
+          if (value.index === 0) {
+            const height = fodHeight(value.value0);
+            if (!Number.isNaN(height)) right = height;
+          } else if (value.index === 1) {
+            const height = fodHeight(value.value0);
+            if (!Number.isNaN(height)) left = height;
+          }
         } else if (value.kind === STAGE_EVENT_WHISPY) whispy = value.value0;
         else if (value.kind === STAGE_EVENT_STADIUM) {
           stadiumEvent = value.value0;

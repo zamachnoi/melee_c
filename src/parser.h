@@ -12,6 +12,9 @@ extern "C" {
 #define SLP_MAX_PORTS 4
 #define SLP_SLOT_COUNT 8      /* 4 ports * (leader + follower) */
 #define SLP_FRAME_BASE 123    /* frame -123 maps to index 0 */
+#define SLP_FOD_STAGE_ID 2
+#define SLP_FOD_RIGHT_START 22.125f /* platform 0 spawn height */
+#define SLP_FOD_LEFT_START 16.125f  /* platform 1 spawn height */
 
 typedef enum {
     SLP_OK = 0,
@@ -144,7 +147,9 @@ typedef struct {
     size_t frame_items_count;
     size_t frame_items_cap;
 
-    /* stage events, one slot per frame index (overwrite = latest wins) */
+    /* stage events, one slot per frame index (overwrite = latest wins).
+       Empty FoD/Whispy/Stadium slots use frame_number == INT32_MIN.
+       slp_fod_at returns the last recorded height at or before the frame. */
     slp_fod_platform_t *fod;      /* index = frame_index * 2 + platform */
     size_t fod_count;
     size_t fod_cap;
@@ -164,6 +169,8 @@ const slp_frame_t *slp_frame_at(const slp_replay_t *r, unsigned port,
 
 const slp_item_list_t *slp_items_at(const slp_replay_t *r,
                                     int32_t frame_number);
+/* Last 0x3F height for this platform at or before frame_number, or NULL
+   if it has not moved yet. */
 const slp_fod_platform_t *slp_fod_at(slp_replay_t *r, int32_t frame_number,
                                      unsigned platform);
 const slp_whispy_blow_t *slp_whispy_at(slp_replay_t *r, int32_t frame_number);

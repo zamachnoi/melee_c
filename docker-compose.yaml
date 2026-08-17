@@ -1,0 +1,27 @@
+# Coolify / Docker Compose deploy.
+#
+# A named volume is required: Dockerfile `VOLUME ["/data/replays"]` only
+# creates an anonymous volume that Coolify discards on rebuild. Uploaded
+# .slp files, the Melee ISO, and the extracted asset cache all live here.
+services:
+  viewer:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      SLP_DIR: /data/replays
+      ASSET_DIR: /data/replays/cache
+      WEB_DIR: /web
+      MELEE_ISO: /data/replays/game.iso
+    volumes:
+      - replays:/data/replays
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/replays >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+volumes:
+  replays:

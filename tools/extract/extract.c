@@ -8,7 +8,7 @@
  * `--effects` walks Ef*Data.dat tables, ItCo.dat articles, and each fighter's
  * ftData item list, then writes schema-4 `.model` files plus `effects.json`.
  *
- * Usage: extract --iso=game.iso --out=cache [--char=falco] [--stage=FD] [--effects]
+ * Usage: extract --iso=game.iso --out=cache [--char=falco] [--stage=FD] [--effects] [--icons]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -22,6 +22,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <zlib.h>
 
 #include "../../src/asset.h"
 
@@ -1448,36 +1449,37 @@ typedef struct{
     const char*anim_dat;  /* Pl<pre>AJ.dat: animation clips */
     const char*const*meshes; /* costume mesh dats, indexed by costume index */
     int nmeshes;
+    int ckind;            /* CSS / external character id */
 }char_info_t;
 
 static const char_info_t CHAR_INFO[]={
-    {"mario", "PlMr.dat", "PlMrAJ.dat", mc_mario_meshes, 5},
-    {"fox", "PlFx.dat", "PlFxAJ.dat", mc_fox_meshes, 4},
-    {"captain_falcon", "PlCa.dat", "PlCaAJ.dat", mc_captain_falcon_meshes, 6},
-    {"donkey_kong", "PlDk.dat", "PlDkAJ.dat", mc_donkey_kong_meshes, 5},
-    {"kirby", "PlKb.dat", "PlKbAJ.dat", mc_kirby_meshes, 6},
-    {"bowser", "PlKp.dat", "PlKpAJ.dat", mc_bowser_meshes, 4},
-    {"link", "PlLk.dat", "PlLkAJ.dat", mc_link_meshes, 5},
-    {"sheik", "PlSk.dat", "PlSkAJ.dat", mc_sheik_meshes, 5},
-    {"ness", "PlNs.dat", "PlNsAJ.dat", mc_ness_meshes, 4},
-    {"peach", "PlPe.dat", "PlPeAJ.dat", mc_peach_meshes, 5},
-    {"popo", "PlPp.dat", "PlPpAJ.dat", mc_popo_meshes, 4},
-    {"nana", "PlNn.dat", "PlNnAJ.dat", mc_nana_meshes, 4},
-    {"pikachu", "PlPk.dat", "PlPkAJ.dat", mc_pikachu_meshes, 4},
-    {"samus", "PlSs.dat", "PlSsAJ.dat", mc_samus_meshes, 5},
-    {"yoshi", "PlYs.dat", "PlYsAJ.dat", mc_yoshi_meshes, 6},
-    {"jigglypuff", "PlPr.dat", "PlPrAJ.dat", mc_jigglypuff_meshes, 5},
-    {"mewtwo", "PlMt.dat", "PlMtAJ.dat", mc_mewtwo_meshes, 4},
-    {"luigi", "PlLg.dat", "PlLgAJ.dat", mc_luigi_meshes, 4},
-    {"marth", "PlMs.dat", "PlMsAJ.dat", mc_marth_meshes, 5},
-    {"zelda", "PlZd.dat", "PlZdAJ.dat", mc_zelda_meshes, 5},
-    {"young_link", "PlCl.dat", "PlClAJ.dat", mc_young_link_meshes, 5},
-    {"dr_mario", "PlDr.dat", "PlDrAJ.dat", mc_dr_mario_meshes, 5},
-    {"falco", "PlFc.dat", "PlFcAJ.dat", mc_falco_meshes, 4},
-    {"pichu", "PlPc.dat", "PlPcAJ.dat", mc_pichu_meshes, 4},
-    {"mr_game_and_watch", "PlGw.dat", "PlGwAJ.dat", mc_mr_game_and_watch_meshes, 4},
-    {"ganondorf", "PlGn.dat", "PlGnAJ.dat", mc_ganondorf_meshes, 5},
-    {"roy", "PlFe.dat", "PlFeAJ.dat", mc_roy_meshes, 5},
+    {"mario", "PlMr.dat", "PlMrAJ.dat", mc_mario_meshes, 5, 8},
+    {"fox", "PlFx.dat", "PlFxAJ.dat", mc_fox_meshes, 4, 2},
+    {"captain_falcon", "PlCa.dat", "PlCaAJ.dat", mc_captain_falcon_meshes, 6, 0},
+    {"donkey_kong", "PlDk.dat", "PlDkAJ.dat", mc_donkey_kong_meshes, 5, 1},
+    {"kirby", "PlKb.dat", "PlKbAJ.dat", mc_kirby_meshes, 6, 4},
+    {"bowser", "PlKp.dat", "PlKpAJ.dat", mc_bowser_meshes, 4, 5},
+    {"link", "PlLk.dat", "PlLkAJ.dat", mc_link_meshes, 5, 6},
+    {"sheik", "PlSk.dat", "PlSkAJ.dat", mc_sheik_meshes, 5, 19},
+    {"ness", "PlNs.dat", "PlNsAJ.dat", mc_ness_meshes, 4, 11},
+    {"peach", "PlPe.dat", "PlPeAJ.dat", mc_peach_meshes, 5, 12},
+    {"popo", "PlPp.dat", "PlPpAJ.dat", mc_popo_meshes, 4, 14},
+    {"nana", "PlNn.dat", "PlNnAJ.dat", mc_nana_meshes, 4, 14},
+    {"pikachu", "PlPk.dat", "PlPkAJ.dat", mc_pikachu_meshes, 4, 13},
+    {"samus", "PlSs.dat", "PlSsAJ.dat", mc_samus_meshes, 5, 16},
+    {"yoshi", "PlYs.dat", "PlYsAJ.dat", mc_yoshi_meshes, 6, 17},
+    {"jigglypuff", "PlPr.dat", "PlPrAJ.dat", mc_jigglypuff_meshes, 5, 15},
+    {"mewtwo", "PlMt.dat", "PlMtAJ.dat", mc_mewtwo_meshes, 4, 10},
+    {"luigi", "PlLg.dat", "PlLgAJ.dat", mc_luigi_meshes, 4, 7},
+    {"marth", "PlMs.dat", "PlMsAJ.dat", mc_marth_meshes, 5, 9},
+    {"zelda", "PlZd.dat", "PlZdAJ.dat", mc_zelda_meshes, 5, 18},
+    {"young_link", "PlCl.dat", "PlClAJ.dat", mc_young_link_meshes, 5, 21},
+    {"dr_mario", "PlDr.dat", "PlDrAJ.dat", mc_dr_mario_meshes, 5, 22},
+    {"falco", "PlFc.dat", "PlFcAJ.dat", mc_falco_meshes, 4, 20},
+    {"pichu", "PlPc.dat", "PlPcAJ.dat", mc_pichu_meshes, 4, 24},
+    {"mr_game_and_watch", "PlGw.dat", "PlGwAJ.dat", mc_mr_game_and_watch_meshes, 4, 3},
+    {"ganondorf", "PlGn.dat", "PlGnAJ.dat", mc_ganondorf_meshes, 5, 25},
+    {"roy", "PlFe.dat", "PlFeAJ.dat", mc_roy_meshes, 5, 23},
 };
 #define CHAR_INFO_N (sizeof(CHAR_INFO)/sizeof(CHAR_INFO[0]))
 
@@ -1896,19 +1898,372 @@ static void extract_effects(const fst_list_t *dats, const uint8_t *iso, const ch
     printf("wrote %u item/effect meshes\n", wrote);
 }
 
+/* ================================================================== */
+/* Stock icons from IfAll.dat::Stc_scemdls                            */
+/* ================================================================== */
+
+/* CSS id + costume → TOBJ animation frame. Zelda/Sheik share a CSS pair;
+   Sheik's fighter kind (7) selects the later atlas row. After Sheik the
+   remaining CSS ids skip that shared slot (`ckind - 1`). */
+static int stock_icon_index(int ckind, int costume, int ftkind) {
+    int base;
+    if (ckind == 18 || ckind == 19) base = (ftkind == 7) ? 25 : 18;
+    else if (ckind == 14) base = 14;
+    else if (ckind > 19) base = ckind - 1;
+    else base = ckind;
+    return base + costume * 30;
+}
+
+static void png_be32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+
+static void write_png_chunk(FILE *f, const char *type, const uint8_t *data, size_t len) {
+    uint8_t lenb[4], crc_b[4];
+    png_be32(lenb, (uint32_t)len);
+    fwrite(lenb, 1, 4, f);
+    fwrite(type, 1, 4, f);
+    if (len) fwrite(data, 1, len, f);
+    uint32_t c = crc32(0L, Z_NULL, 0);
+    c = crc32(c, (const Bytef *)type, 4);
+    if (len) c = crc32(c, data, (uInt)len);
+    png_be32(crc_b, c);
+    fwrite(crc_b, 1, 4, f);
+}
+
+static int write_png_rgba(const char *path, uint16_t w, uint16_t h, const uint8_t *rgba) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    fwrite(sig, 1, 8, f);
+    uint8_t ihdr[13];
+    png_be32(ihdr, w); png_be32(ihdr + 4, h);
+    ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    write_png_chunk(f, "IHDR", ihdr, 13);
+    size_t raw_len = ((size_t)w * 4 + 1) * h;
+    uint8_t *raw = malloc(raw_len);
+    if (!raw) { fclose(f); return -1; }
+    size_t o = 0;
+    for (uint16_t y = 0; y < h; y++) {
+        raw[o++] = 0;
+        memcpy(raw + o, rgba + (size_t)y * w * 4, (size_t)w * 4);
+        o += (size_t)w * 4;
+    }
+    uLongf clen = compressBound(raw_len);
+    uint8_t *z = malloc(clen);
+    int rc = z && compress2(z, &clen, raw, (uLong)raw_len, Z_BEST_COMPRESSION) == Z_OK ? 0 : -1;
+    if (rc == 0) write_png_chunk(f, "IDAT", z, clen);
+    write_png_chunk(f, "IEND", NULL, 0);
+    fclose(f); free(raw); free(z);
+    return rc;
+}
+
+static int decode_image_abs(const dat_t *d, uint32_t image_abs, uint32_t tlut_abs,
+                            uint16_t *w_out, uint16_t *h_out, uint8_t **rgba_out) {
+    if (!image_abs || image_abs + 0x18 > d->len) return -1;
+    const uint8_t *im = d->bytes + image_abs;
+    uint32_t data_rel = r32(im);
+    uint16_t w = r16(im + 4), h = r16(im + 6);
+    uint32_t fmt = r32(im + 8);
+    if (w == 0 || h == 0 || w > 1024 || h > 1024) return -1;
+    uint32_t *pal = NULL;
+    size_t paln = 0;
+    if (tlut_abs && tlut_abs + 0x10 <= d->len) {
+        const uint8_t *tl = d->bytes + tlut_abs;
+        uint32_t ldata = r32(tl), pal_fmt = r32(tl + 4);
+        uint16_t ncols = r16(tl + 0x0C);
+        if (ldata && ncols) {
+            uint32_t lda = dat_abs(d, ldata);
+            paln = ncols;
+            pal = malloc(ncols * sizeof(uint32_t));
+            if (!pal) return -1;
+            for (uint16_t i = 0; i < ncols && lda + (uint32_t)i * 2 + 2 <= d->len; i++) {
+                uint16_t p = r16(d->bytes + lda + (uint32_t)i * 2);
+                if (pal_fmt == 0) pal[i] = pal_entry_ia8(p);
+                else if (pal_fmt == 1) pal[i] = pal_entry_rgb565(p);
+                else pal[i] = pal_entry_rgb5a3(p);
+            }
+        }
+    }
+    size_t ts = 0;
+    switch (fmt) {
+        case 0: case 8: case 14: ts = (size_t)((w + 7) / 8) * ((h + 7) / 8) * 32; break;
+        case 1: case 2: case 9: ts = (size_t)((w + 7) / 8) * ((h + 3) / 4) * 32; break;
+        case 3: case 4: case 5: case 10: ts = (size_t)((w + 3) / 4) * ((h + 3) / 4) * 32; break;
+        case 6: ts = (size_t)((w + 3) / 4) * ((h + 3) / 4) * 64; break;
+        default: ts = (size_t)w * h * 4; break;
+    }
+    uint32_t da = dat_abs(d, data_rel);
+    if (da >= d->len) { free(pal); return -1; }
+    if (da + ts > d->len) ts = d->len - da;
+    uint8_t *rgba = malloc((size_t)w * h * 4);
+    if (!rgba) { free(pal); return -1; }
+    decode_texture(fmt, w, h, d->bytes + da, pal, paln, rgba);
+    free(pal);
+    *w_out = w; *h_out = h; *rgba_out = rgba;
+    return 0;
+}
+
+typedef struct {
+    uint32_t imagetbl, tluttbl, aobj;
+    uint16_t n_image, n_tlut;
+} texanim_ref_t;
+
+static void consider_texanim(const dat_t *d, const reloc_idx_t *ri, uint32_t tex_abs,
+                             texanim_ref_t *best) {
+    while (tex_abs && tex_abs + 0x18 <= d->len) {
+        uint32_t rel = tex_abs - 0x20;
+        uint32_t imagetbl = rdptr(d, ri, rel, 0x0C);
+        uint32_t tluttbl = rdptr(d, ri, rel, 0x10);
+        uint32_t aobj = rdptr(d, ri, rel, 0x08);
+        uint16_t n_image = r16(d->bytes + tex_abs + 0x14);
+        uint16_t n_tlut = r16(d->bytes + tex_abs + 0x16);
+        if (n_image > best->n_image && imagetbl) {
+            best->imagetbl = imagetbl;
+            best->tluttbl = tluttbl;
+            best->aobj = aobj;
+            best->n_image = n_image;
+            best->n_tlut = n_tlut;
+        }
+        tex_abs = rdptr(d, ri, rel, 0);
+    }
+}
+
+static void walk_matanim(const dat_t *d, const reloc_idx_t *ri, uint32_t mat_abs,
+                         texanim_ref_t *best, int depth) {
+    for (int i = 0; mat_abs && mat_abs + 0x10 <= d->len && i < 64; i++) {
+        uint32_t rel = mat_abs - 0x20;
+        consider_texanim(d, ri, rdptr(d, ri, rel, 8), best);
+        mat_abs = rdptr(d, ri, rel, 0);
+    }
+    (void)depth;
+}
+
+static void walk_matanim_joint(const dat_t *d, const reloc_idx_t *ri, uint32_t joint_abs,
+                               texanim_ref_t *best, int depth) {
+    if (!joint_abs || joint_abs + 12 > d->len || depth > 24) return;
+    uint32_t rel = joint_abs - 0x20;
+    walk_matanim(d, ri, rdptr(d, ri, rel, 8), best, depth);
+    walk_matanim_joint(d, ri, rdptr(d, ri, rel, 0), best, depth + 1);
+    walk_matanim_joint(d, ri, rdptr(d, ri, rel, 4), best, depth);
+}
+
+static uint32_t first_tobj_tlut(const dat_t *d, const reloc_idx_t *ri, uint32_t jobj_abs, int depth) {
+    if (!jobj_abs || jobj_abs + 0x40 > d->len || depth > 24) return 0;
+    uint32_t rel = jobj_abs - 0x20;
+    uint32_t dobj = rdptr(d, ri, rel, 0x10);
+    while (dobj && dobj + 0x10 <= d->len) {
+        uint32_t drel = dobj - 0x20;
+        uint32_t mobj = rdptr(d, ri, drel, 8);
+        if (mobj && mobj + 0x18 <= d->len) {
+            uint32_t tobj = rdptr(d, ri, mobj - 0x20, 8);
+            if (tobj && tobj + 0x5C <= d->len) {
+                uint32_t tlut = rdptr(d, ri, tobj - 0x20, 0x50);
+                if (tlut) return tlut;
+            }
+        }
+        dobj = rdptr(d, ri, drel, 4);
+    }
+    uint32_t found = first_tobj_tlut(d, ri, rdptr(d, ri, rel, 8), depth + 1);
+    if (found) return found;
+    return first_tobj_tlut(d, ri, rdptr(d, ri, rel, 0x0C), depth);
+}
+
+static int collect_stc_texanim(const dat_t *d, const reloc_idx_t *ri, uint32_t root_abs,
+                               texanim_ref_t *best, uint32_t *fallback_tlut) {
+    /* Root is DynamicModelDesc**: an array of model pointers. */
+    for (uint32_t i = 0; i < 16; i++) {
+        uint32_t desc = rdptr(d, ri, root_abs - 0x20, i * 4);
+        if (!desc) break;
+        uint32_t drel = desc - 0x20;
+        uint32_t joint = rdptr(d, ri, drel, 0);
+        uint32_t matanims = rdptr(d, ri, drel, 8);
+        if (matanims) {
+            uint32_t mat0 = rdptr(d, ri, matanims - 0x20, 0);
+            walk_matanim_joint(d, ri, mat0, best, 0);
+        }
+        if (joint && !*fallback_tlut) *fallback_tlut = first_tobj_tlut(d, ri, joint, 0);
+    }
+    return best->n_image ? 0 : -1;
+}
+
+static uint32_t tlut_for_index(const dat_t *d, const reloc_idx_t *ri, const texanim_ref_t *atlas,
+                               uint32_t fallback, int index) {
+    if (!atlas->tluttbl || atlas->n_tlut == 0) return fallback;
+    int slot = index;
+    if (slot >= atlas->n_tlut) slot = 0;
+    uint32_t tlut = rdptr(d, ri, atlas->tluttbl - 0x20, (uint32_t)slot * 4);
+    return tlut ? tlut : fallback;
+}
+
+typedef struct { float frame; float value; } fobj_key_t;
+
+static int parse_fobj_keys(const dat_t *d, const reloc_idx_t *ri, uint32_t aobj_abs,
+                           int want_type, fobj_key_t **out, uint32_t *n_out) {
+    *out = NULL; *n_out = 0;
+    if (!aobj_abs || aobj_abs + 0x10 > d->len) return -1;
+    uint32_t fobj_abs = rdptr(d, ri, aobj_abs - 0x20, 8);
+    while (fobj_abs && fobj_abs + 0x14 <= d->len) {
+        uint32_t rel = fobj_abs - 0x20;
+        uint8_t type = d->bytes[fobj_abs + 12];
+        uint8_t vflag = d->bytes[fobj_abs + 13];
+        uint8_t sflag = d->bytes[fobj_abs + 14];
+        if (type == want_type) {
+            uint32_t da = rdptr(d, ri, rel, 0x10);
+            uint32_t length = r32(d->bytes + fobj_abs + 4);
+            float start = rf32(d->bytes + fobj_abs + 8);
+            if (!da) return -1;
+            size_t stream_len = length;
+            if (stream_len == 0 || da + stream_len > d->len) stream_len = d->len - da;
+            int vfmt = (vflag >> 5) & 7, vshift = vflag & 0x1F;
+            int sfmt = (sflag >> 5) & 7, sshift = sflag & 0x1F;
+            size_t cur = 0;
+            uint32_t cap = 32, nk = 0;
+            fobj_key_t *keys = malloc(cap * sizeof(fobj_key_t));
+            float frame = start;
+            while (cur < stream_len) {
+                uint32_t packed = read_packed(d->bytes + da, &cur, stream_len);
+                uint32_t op = packed & 0x0F;
+                if (op == 0) break;
+                uint32_t kcount = (packed >> 4) + 1;
+                for (uint32_t q = 0; q < kcount; q++) {
+                    float val = 0;
+                    if (op == 1 || op == 2 || op == 3) {
+                        val = read_packed_value(d->bytes + da, &cur, stream_len, vfmt, vshift);
+                    } else if (op == 4) {
+                        val = read_packed_value(d->bytes + da, &cur, stream_len, vfmt, vshift);
+                        read_packed_value(d->bytes + da, &cur, stream_len, sfmt, sshift);
+                    } else if (op == 5) {
+                        read_packed_value(d->bytes + da, &cur, stream_len, sfmt, sshift);
+                        continue;
+                    } else if (op == 6) {
+                        read_packed_value(d->bytes + da, &cur, stream_len, vfmt, vshift);
+                        continue;
+                    }
+                    if (nk == cap) { cap *= 2; keys = realloc(keys, cap * sizeof(fobj_key_t)); }
+                    keys[nk].frame = frame;
+                    keys[nk].value = val;
+                    nk++;
+                    frame += (float)read_packed(d->bytes + da, &cur, stream_len);
+                }
+            }
+            *out = keys; *n_out = nk;
+            return 0;
+        }
+        fobj_abs = rdptr(d, ri, rel, 0);
+    }
+    return -1;
+}
+
+static int sample_step(const fobj_key_t *keys, uint32_t n, float frame, int fallback) {
+    if (!n) return fallback;
+    uint32_t best = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (keys[i].frame <= frame + 1e-3f) best = i;
+        else break;
+    }
+    int v = (int)(keys[best].value + (keys[best].value < 0 ? -0.5f : 0.5f));
+    return v;
+}
+
+static void extract_stock_icons(const fst_list_t *dats, const uint8_t *iso, const char *out) {
+    const fst_file_t *file = iso_find(dats, "IfAll.dat");
+    if (!file) { fprintf(stderr, "extract: IfAll.dat not on disc\n"); return; }
+    dat_t d;
+    if (dat_open(iso + file->offset, file->size, &d)) {
+        fprintf(stderr, "extract: cannot open IfAll.dat\n");
+        return;
+    }
+    reloc_idx_t ri;
+    reloc_build(&d, &ri);
+    uint32_t stc_root = 0;
+    for (uint32_t r = 0; r < d.root_count; r++) {
+        uint32_t data_off = r32(d.bytes + d.roots_start + (size_t)r * 8);
+        uint32_t name_off = r32(d.bytes + d.roots_start + (size_t)r * 8 + 4);
+        if (strcmp(dat_name(&d, name_off), "Stc_scemdls") == 0) {
+            stc_root = dat_abs(&d, data_off);
+            break;
+        }
+    }
+    if (!stc_root) { fprintf(stderr, "extract: Stc_scemdls missing\n"); free(ri.offs); return; }
+    texanim_ref_t atlas = {0};
+    uint32_t fallback_tlut = 0;
+    if (collect_stc_texanim(&d, &ri, stc_root, &atlas, &fallback_tlut) != 0) {
+        fprintf(stderr, "extract: no stock-icon TexAnim in Stc_scemdls\n");
+        free(ri.offs);
+        return;
+    }
+    printf("stock icons: %u images, %u palettes\n", atlas.n_image, atlas.n_tlut);
+    fobj_key_t *timg_keys = NULL, *tclt_keys = NULL;
+    uint32_t n_timg = 0, n_tclt = 0;
+    parse_fobj_keys(&d, &ri, atlas.aobj, 1, &timg_keys, &n_timg);
+    parse_fobj_keys(&d, &ri, atlas.aobj, 10, &tclt_keys, &n_tclt);
+    printf("  TIMG keys=%u TCLT keys=%u\n", n_timg, n_tclt);
+
+    uint8_t **decoded = calloc(atlas.n_image, sizeof(uint8_t *));
+    uint16_t *widths = calloc(atlas.n_image, sizeof(uint16_t));
+    uint16_t *heights = calloc(atlas.n_image, sizeof(uint16_t));
+    if (!decoded || !widths || !heights) die("oom");
+    unsigned decoded_n = 0;
+    for (uint16_t i = 0; i < atlas.n_image; i++) {
+        uint32_t image = rdptr(&d, &ri, atlas.imagetbl - 0x20, (uint32_t)i * 4);
+        if (!image) continue;
+        uint32_t tlut = tlut_for_index(&d, &ri, &atlas, fallback_tlut, i);
+        if (decode_image_abs(&d, image, tlut, &widths[i], &heights[i], &decoded[i]) == 0)
+            decoded_n++;
+    }
+    printf("  decoded %u/%u image descriptors\n", decoded_n, atlas.n_image);
+
+    char icon_dir[1100];
+    snprintf(icon_dir, sizeof icon_dir, "%s/icons", out);
+    if (mkdir(icon_dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "extract: cannot create %s\n", icon_dir);
+        for (uint16_t i = 0; i < atlas.n_image; i++) free(decoded[i]);
+        free(decoded); free(widths); free(heights); free(timg_keys); free(tclt_keys); free(ri.offs);
+        return;
+    }
+
+    unsigned wrote = 0;
+    for (size_t c = 0; c < CHAR_INFO_N; c++) {
+        const char_info_t *ci = &CHAR_INFO[c];
+        for (int col = 0; col < ci->nmeshes; col++) {
+            int anim = stock_icon_index(ci->ckind, col, (int)c);
+            int idx = sample_step(timg_keys, n_timg, (float)anim, anim);
+            int used = col;
+            while ((idx < 0 || idx >= atlas.n_image || !decoded[idx]) && used > 0) {
+                used--;
+                anim = stock_icon_index(ci->ckind, used, (int)c);
+                idx = sample_step(timg_keys, n_timg, (float)anim, anim);
+            }
+            if (idx < 0 || idx >= atlas.n_image || !decoded[idx]) {
+                fprintf(stderr, "extract: no stock icon for %s costume %d\n", ci->name, col);
+                continue;
+            }
+            char path[1200];
+            snprintf(path, sizeof path, "%s/icons/%s-%d.png", out, ci->name, col);
+            if (write_png_rgba(path, widths[idx], heights[idx], decoded[idx]) == 0) wrote++;
+        }
+    }
+    for (uint16_t i = 0; i < atlas.n_image; i++) free(decoded[i]);
+    free(decoded); free(widths); free(heights); free(timg_keys); free(tclt_keys); free(ri.offs);
+    printf("wrote %u character/costume stock icons\n", wrote);
+}
+
 int main(int argc,char**argv){
     const char*iso_path="fixtures/game.iso";
     const char*out="cache";
     const char*which_char=NULL,*which_stage=NULL;
-    int want_effects=0,all_mode=0;
+    int want_effects=0,all_mode=0,want_icons=0;
     for(int i=1;i<argc;i++){
         if(strncmp(argv[i],"--iso=",6)==0)iso_path=argv[i]+6;
         else if(strncmp(argv[i],"--out=",6)==0)out=argv[i]+6;
         else if(strncmp(argv[i],"--char=",7)==0)which_char=argv[i]+7;
         else if(strncmp(argv[i],"--stage=",8)==0)which_stage=argv[i]+8;
         else if(strcmp(argv[i],"--effects")==0)want_effects=1;
+        else if(strcmp(argv[i],"--icons")==0)want_icons=1;
         else if(strcmp(argv[i],"--all")==0){
-            all_mode=1;want_effects=1;
+            all_mode=1;want_effects=1;want_icons=1;
             if(!which_char)which_char="all";
             if(!which_stage)which_stage="all";
         }
@@ -2022,6 +2377,7 @@ int main(int argc,char**argv){
         }
     }
     if(want_effects) extract_effects(&dats,iso_bytes,out);
+    if(want_icons || which_char) extract_stock_icons(&dats,iso_bytes,out);
     write_meta(out,ASSET_SCHEMA_VERSION);
     free(iso_bytes);
     printf("done\n");
