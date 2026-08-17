@@ -699,6 +699,7 @@ export class WebGL2Renderer implements Renderer {
     this.drawEffects();
     this.drawOverlays(camera);
     gl.bindVertexArray(null);
+    gl.flush();
   }
 
   get gpuBytes(): number {

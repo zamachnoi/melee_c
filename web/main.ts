@@ -684,10 +684,12 @@ export async function bootWebGL2(): Promise<void> {
   const resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(viewportElement);
   addEventListener('resize', resize);
-  addEventListener('pagehide', () => {
-    stopPlayback(); loadController?.abort(); resizeObserver.disconnect();
-    removeEventListener('resize', resize); renderer.dispose();
-  }, { once: true });
+  addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && timeline) renderCurrent();
+  });
+  addEventListener('pageshow', event => {
+    if (event.persisted && timeline) resize();
+  });
   resize();
 
   let dragging = false;

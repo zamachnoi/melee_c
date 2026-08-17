@@ -59,7 +59,12 @@ assert.match(asset.headers.get('cache-control'), /immutable/);
 const moduleResponse = await fetch(`${baseUrl}/main.js`);
 assert.equal(moduleResponse.status, 200);
 assert.match(moduleResponse.headers.get('content-type'), /text\/javascript/);
+assert.match(moduleResponse.headers.get('cache-control'), /no-store/);
 assert.match(await moduleResponse.text(), /parseTimeline/);
+const viewerResponse = await fetch(`${baseUrl}/viewer.js`);
+assert.equal(viewerResponse.status, 200);
+assert.match(viewerResponse.headers.get('content-type'), /text\/javascript/);
+assert.match(viewerResponse.headers.get('cache-control'), /no-store/);
 const animationModule = await fetch(`${baseUrl}/animation/pose.js`);
 assert.equal(animationModule.status, 200);
 assert.match(animationModule.headers.get('content-type'), /text\/javascript/);
@@ -67,14 +72,19 @@ const sceneModule = await fetch(`${baseUrl}/replay/scene.js`);
 assert.equal(sceneModule.status, 200);
 assert.match(sceneModule.headers.get('content-type'), /text\/javascript/);
 
-const [defaultPage, softwarePage, explicitWebglPage] = await Promise.all([
-  fetch(`${baseUrl}/`).then(response => response.text()),
+const [defaultResponse, softwarePage, explicitWebglPage] = await Promise.all([
+  fetch(`${baseUrl}/`),
   fetch(`${baseUrl}/?renderer=software`).then(response => response.text()),
   fetch(`${baseUrl}/?renderer=webgl2`).then(response => response.text()),
 ]);
+assert.match(defaultResponse.headers.get('cache-control'), /no-store/);
+const defaultPage = await defaultResponse.text();
 assert.match(defaultPage, /data-renderer="webgl2"/);
 assert.match(defaultPage, /Melee replay/);
+assert.match(defaultPage, /\/viewer\.js\?v=[0-9a-f]{12}/);
+assert.doesNotMatch(defaultPage, /src="\/main\.js"/);
 assert.match(explicitWebglPage, /data-renderer="webgl2"/);
+assert.match(explicitWebglPage, /\/viewer\.js\?v=[0-9a-f]{12}/);
 assert.match(softwarePage, /Melee 2D Replay/);
 assert.doesNotMatch(softwarePage, /data-renderer="webgl2"/);
 
