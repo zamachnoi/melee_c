@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
 #include <errno.h>
@@ -1218,10 +1219,40 @@ static uint32_t find_mesh_root(const dat_t*d){
     return 0;
 }
 
+/* Decode a character's full animation bank once.  Every costume of the same
+   character shares Pl<X>AJ.dat, so the result is reused across costumes. */
+static asset_anims_t*decode_character_anims(const fst_list_t*dats,const uint8_t*iso,
+                                            const char*data_dat,const char*anim_dat,
+                                            uint32_t*ok_out){
+    const fst_file_t*fc=iso_find(dats,data_dat);
+    const fst_file_t*ajf=iso_find(dats,anim_dat);
+    if(!fc||!ajf)return NULL;
+    dat_t dc;if(dat_open(iso+fc->offset,fc->size,&dc))return NULL;
+    action_entry_t*acts;uint32_t nact;
+    if(extract_actions(&dc,&acts,&nact)!=0)return NULL;
+    asset_anims_t*anims=calloc(1,sizeof(asset_anims_t));
+    anims->actions=calloc(nact?nact:1,sizeof(asset_action_t));
+    anims->action_count=nact;
+    uint32_t ok=0;
+    for(uint32_t i=0;i<nact;i++){
+        if(acts[i].anim_off>=ajf->size)continue;
+        asset_action_t*act=&anims->actions[i];
+        if(decode_clip(iso+ajf->offset,ajf->size,acts[i].anim_off,
+                       acts[i].anim_size?acts[i].anim_size:(ajf->size-acts[i].anim_off),
+                       &acts[i],act)==0){
+            if(act->joint_count)ok++;
+        }
+    }
+    if(ok_out)*ok_out=ok;
+    printf("  decoded %u/%u clips with joints\n",ok,nact);
+    free(acts);
+    return anims;
+}
+
 /* extract model + animations for one character+costume into <out>/<slug>.* */
 static void extract_char(const fst_list_t*dats,const uint8_t*iso,
                          const char*data_dat,const char*mesh_dat,const char*anim_dat,
-                         const char*slug,const char*out){
+                         const char*slug,const char*out,asset_anims_t*shared_anims){
     const fst_file_t*fc=iso_find(dats,data_dat);
     const fst_file_t*nrf=iso_find(dats,mesh_dat);
     if(!fc&&!nrf){fprintf(stderr,"extract: %s / %s not on disc\n",data_dat,mesh_dat);return;}
@@ -1244,29 +1275,18 @@ static void extract_char(const fst_list_t*dats,const uint8_t*iso,
     }
 
     /* animations: action table from main dat, clips from AJ dat */
+    if(shared_anims){
+        char aname[128];snprintf(aname,sizeof aname,"%s.anims",slug);
+        write_anims_file(out,aname,shared_anims);
+        return;
+    }
     const fst_file_t*ajf=iso_find(dats,anim_dat);
     if(have_dc&&ajf){
-        {
-            action_entry_t*acts;uint32_t nact;
-            if(extract_actions(&dc,&acts,&nact)==0){
-                asset_anims_t*anims=calloc(1,sizeof(asset_anims_t));
-                anims->actions=calloc(nact?nact:1,sizeof(asset_action_t));
-                anims->action_count=nact;
-                uint32_t ok=0;
-                for(uint32_t i=0;i<nact;i++){
-                    if(acts[i].anim_off>=ajf->size)continue;
-                    asset_action_t*act=&anims->actions[i];
-                    if(decode_clip(iso+ajf->offset,ajf->size,acts[i].anim_off,
-                                   acts[i].anim_size?acts[i].anim_size:(ajf->size-acts[i].anim_off),
-                                   &acts[i],act)==0){
-                        if(act->joint_count)ok++;
-                    }
-                }
-                char aname[128];snprintf(aname,sizeof aname,"%s.anims",slug);
-                write_anims_file(out,aname,anims);
-                printf("  decoded %u/%u clips with joints\n",ok,nact);
-                free(acts);
-            }
+        uint32_t ok=0;
+        asset_anims_t*anims=decode_character_anims(dats,iso,data_dat,anim_dat,&ok);
+        if(anims){
+            char aname[128];snprintf(aname,sizeof aname,"%s.anims",slug);
+            write_anims_file(out,aname,anims);
         }
     }
 }
@@ -1595,13 +1615,18 @@ int main(int argc,char**argv){
     const char*iso_path="fixtures/game.iso";
     const char*out="cache";
     const char*which_char=NULL,*which_stage=NULL;
-    int want_effects=0;
+    int want_effects=0,all_mode=0;
     for(int i=1;i<argc;i++){
         if(strncmp(argv[i],"--iso=",6)==0)iso_path=argv[i]+6;
         else if(strncmp(argv[i],"--out=",6)==0)out=argv[i]+6;
         else if(strncmp(argv[i],"--char=",7)==0)which_char=argv[i]+7;
         else if(strncmp(argv[i],"--stage=",8)==0)which_stage=argv[i]+8;
         else if(strcmp(argv[i],"--effects")==0)want_effects=1;
+        else if(strcmp(argv[i],"--all")==0){
+            all_mode=1;want_effects=1;
+            if(!which_char)which_char="all";
+            if(!which_stage)which_stage="all";
+        }
     }
 
     FILE*iso=fopen(iso_path,"rb");if(!iso)die("cannot open iso");
@@ -1616,42 +1641,86 @@ int main(int argc,char**argv){
     if(mkdir(out,0755)!=0&&errno!=EEXIST)die("cannot create output directory");
 
     if(which_char){
-        const char_info_t*ci=char_lookup(which_char);
-        if(!ci){fprintf(stderr,"extract: unknown character '%s'\n",which_char);return 1;}
-        int have_color=0,color_idx=0;
-        for(int i=1;i<argc;i++)
-            if(strncmp(argv[i],"--color=",8)==0){color_idx=atoi(argv[i]+8);have_color=1;break;}
-        if(have_color){
-            if(color_idx<0||color_idx>=ci->nmeshes){
-                fprintf(stderr,"extract: %s has no costume index %d (0..%d)\n",ci->name,color_idx,ci->nmeshes-1);
-                return 1;
+        if(strcasecmp(which_char,"all")==0||all_mode){
+            for(size_t c=0;c<CHAR_INFO_N;c++){
+                const char_info_t*ci=&CHAR_INFO[c];
+                asset_anims_t*anims=NULL;
+                for(int col=0;col<ci->nmeshes;col++){
+                    char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,col);
+                    if(!anims)anims=decode_character_anims(&dats,iso_bytes,
+                                                          ci->data_dat,ci->anim_dat,NULL);
+                    printf("extracting %s (costume %d) mesh=%s\n",ci->name,col,ci->meshes[col]);
+                    extract_char(&dats,iso_bytes,ci->data_dat,ci->meshes[col],ci->anim_dat,
+                                 slug,out,anims);
+                }
             }
-            const char*mesh=ci->meshes[color_idx];
-            char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,color_idx);
-            printf("extracting %s (costume %d) mesh=%s\n",ci->name,color_idx,mesh);
-            extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,out);
         }else{
-            for(int c=0;c<ci->nmeshes;c++){
-                const char*mesh=ci->meshes[c];
-                char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,c);
-                printf("extracting %s (costume %d) mesh=%s\n",ci->name,c,mesh);
-                extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,out);
+            const char_info_t*ci=char_lookup(which_char);
+            if(!ci){fprintf(stderr,"extract: unknown character '%s'\n",which_char);return 1;}
+            int have_color=0,color_idx=0;
+            for(int i=1;i<argc;i++)
+                if(strncmp(argv[i],"--color=",8)==0){color_idx=atoi(argv[i]+8);have_color=1;break;}
+            if(have_color){
+                if(color_idx<0||color_idx>=ci->nmeshes){
+                    fprintf(stderr,"extract: %s has no costume index %d (0..%d)\n",ci->name,color_idx,ci->nmeshes-1);
+                    return 1;
+                }
+                const char*mesh=ci->meshes[color_idx];
+                char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,color_idx);
+                printf("extracting %s (costume %d) mesh=%s\n",ci->name,color_idx,mesh);
+                extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,out,NULL);
+            }else{
+                asset_anims_t*anims=NULL;
+                for(int c=0;c<ci->nmeshes;c++){
+                    const char*mesh=ci->meshes[c];
+                    char slug[128];snprintf(slug,sizeof slug,"%s-%d",ci->name,c);
+                    if(!anims)anims=decode_character_anims(&dats,iso_bytes,
+                                                          ci->data_dat,ci->anim_dat,NULL);
+                    printf("extracting %s (costume %d) mesh=%s\n",ci->name,c,mesh);
+                    extract_char(&dats,iso_bytes,ci->data_dat,mesh,ci->anim_dat,slug,out,anims);
+                }
             }
         }
     }
-    if(which_stage){
+    if(which_stage||all_mode){
         const char*stname=NULL;
-        if(strcasecmp(which_stage,"FD")==0||strcasecmp(which_stage,"final-destination")==0)stname="GrNLa.dat";
-        if(stname){
-            const fst_file_t*sf=iso_find(&dats,stname);
-            if(!sf)die("stage dat not found");
-            dat_t sd;
-            if(dat_open(iso_bytes+sf->offset,sf->size,&sd))die("stage dat");
-            asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
-            if(decode_stage(&sd,st)==0){
-                write_stage_file(out,"fd.stage",st);
-            }else{
-                printf("stage decode failed\n");
+        if(strcasecmp(which_stage,"all")==0||all_mode){
+            for(size_t i=0;i<dats.count;i++){
+                const char*p=strrchr(dats.items[i].path,'/');
+                const char*bn=p?p+1:dats.items[i].path;
+                if(strncmp(bn,"Gr",2)!=0)continue;
+                if(strncmp(bn,"GrT",3)==0)continue; /* target-test stages */
+                if(strncmp(bn,"GrEF",4)==0)continue; /* event stages */
+                if(strncmp(bn,"GrI1",4)==0||strncmp(bn,"GrI2",4)==0)continue; /* Mushroom Kingdom halves */
+                dat_t sd;
+                if(dat_open(iso_bytes+dats.items[i].offset,dats.items[i].size,&sd))continue;
+                asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
+                if(decode_stage(&sd,st)==0){
+                    char name[256];int n=0;
+                    for(const char*q=bn;*q&&*q!='.';q++)name[n++]=tolower((unsigned char)*q);
+                    snprintf(name+n,sizeof name-(size_t)n,".stage");
+                    write_stage_file(out,name,st);
+                    if(strcasecmp(bn,"GrNLa.dat")==0)write_stage_file(out,"fd.stage",st);
+                }else{
+                    printf("stage decode failed: %s\n",bn);
+                }
+                free(st->sections);
+                free(st->lights);
+                free(st);
+            }
+        }else if(which_stage){
+            if(strcasecmp(which_stage,"FD")==0||strcasecmp(which_stage,"final-destination")==0)stname="GrNLa.dat";
+            if(stname){
+                const fst_file_t*sf=iso_find(&dats,stname);
+                if(!sf)die("stage dat not found");
+                dat_t sd;
+                if(dat_open(iso_bytes+sf->offset,sf->size,&sd))die("stage dat");
+                asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
+                if(decode_stage(&sd,st)==0){
+                    write_stage_file(out,"fd.stage",st);
+                }else{
+                    printf("stage decode failed\n");
+                }
             }
         }
     }

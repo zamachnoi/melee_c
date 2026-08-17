@@ -12,9 +12,7 @@ if [ ! -f "$asset_dir/fd.stage" ] || \
     if [ -f "$iso_path" ]; then
         echo "Building Melee render cache from mounted ISO..."
         mkdir -p "$asset_dir"
-        extract_tool --iso="$iso_path" --char=fox --stage=FD --out="$asset_dir"
-        extract_tool --iso="$iso_path" --char=falco --out="$asset_dir"
-        extract_tool --iso="$iso_path" --effects --out="$asset_dir"
+        extract_tool --iso="$iso_path" --all --out="$asset_dir"
     else
         echo "Warning: $iso_path is missing; 2D assets are unavailable" >&2
     fi

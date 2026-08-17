@@ -345,6 +345,54 @@ static void character_slug(uint8_t id, char *out, size_t cap) {
     out[n] = '\0';
 }
 
+/* Map Slippi stage id to the extracted stage asset basename (the lowercased
+   DAT file name).  The WebGL2 manifest emits this so the browser can fetch
+   /assets/v4/stages/<basename>.stage.  Unknown stages return NULL so callers
+   degrade gracefully (the frontend warns when a stage asset is missing). */
+static const char *stage_asset_slug(uint16_t stage) {
+    switch (stage) {
+        case 2:  return "griz";    /* Fountain of Dreams   */
+        case 3:  return "grps";    /* Pokemon Stadium      */
+        case 4:  return "grcs";    /* Princess Peach's Castle */
+        case 5:  return "grkg";    /* Kongo Jungle         */
+        case 6:  return "grze";    /* Brinstar             */
+        case 7:  return "grcn";    /* Corneria             */
+        case 8:  return "grst";    /* Yoshi's Story        */
+        case 9:  return "grot";    /* Onett                */
+        case 10: return "grmc";    /* Mute City            */
+        case 11: return "grrc";    /* Rainbow Cruise       */
+        case 12: return "grgd";    /* Jungle Japes         */
+        case 13: return "grgb";    /* Great Bay            */
+        case 14: return "grhr";    /* Hyrule Temple        */
+        case 15: return "grkr";    /* Brinstar Depths      */
+        case 16: return "gryt";    /* Yoshi's Island       */
+        case 17: return "grgr";    /* Green Greens         */
+        case 18: return "grfs";    /* Fourside             */
+        case 19: return "gri1";    /* Mushroom Kingdom I   */
+        case 20: return "gri2";    /* Mushroom Kingdom II  */
+        case 22: return "grve";    /* Venom                */
+        case 23: return "grnpo";   /* Poke Floats          */
+        case 24: return "grbb";    /* Big Blue             */
+        case 25: return "grim";    /* Icicle Mountain      */
+        case 27: return "grfz";    /* Flat Zone            */
+        case 28: return "grop";    /* Dream Land 64        */
+        case 29: return "groy";    /* Yoshi's Island N64   */
+        case 30: return "grok";    /* Kongo Jungle N64     */
+        case 31: return "grnba";   /* Battlefield          */
+        case 32: return "grnla";   /* Final Destination    */
+        default: return NULL;
+    }
+}
+
+/* Load the stage asset for a replay's stage id, if present on disk. */
+static asset_stage_t *load_replay_stage(uint16_t stage) {
+    const char *slug = stage_asset_slug(stage);
+    if (!slug) return NULL;
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s.stage", asset_dir(), slug);
+    return asset_stage_load(path);
+}
+
 static void load_scene_assets(active_t *a) {
     const slp_game_start_t *gs = &a->replay.game_start;
     for (unsigned slot = 0; slot < SLP_SLOT_COUNT; slot++) {
@@ -370,11 +418,7 @@ static void load_scene_assets(active_t *a) {
         a->models[slot] = asset_model_load(model_path);
         a->anims[slot] = asset_anims_load(anim_path);
     }
-    if (gs->stage_id == 32) {
-        char path[512];
-        snprintf(path, sizeof path, "%s/fd.stage", asset_dir());
-        a->stage = asset_stage_load(path);
-    }
+    a->stage = load_replay_stage(gs->stage_id);
 }
 
 /* Stage half-widths so the ground bar spans roughly the right width. */
@@ -1448,12 +1492,9 @@ static timeline_camera_t *make_timeline_cameras(const slp_replay_t *r,
     temp.start_frame = start;
     temp.last_frame = end;
     compute_camera(&temp.replay, &temp.cam);
-    if (r->game_start.stage_id == 32) {
-        char stage_path[1400];
-        snprintf(stage_path, sizeof stage_path, "%s/fd.stage", asset_dir());
-        temp.stage = asset_stage_load(stage_path);
+    temp.stage = load_replay_stage(r->game_start.stage_id);
+    if (temp.stage)
         compute_stage_camera(temp.stage, &temp.cam);
-    }
     build_gameplay_cameras(&temp);
     timeline_camera_t *samples = malloc(count * sizeof(*samples));
     if (!samples) {
@@ -1544,10 +1585,11 @@ static void handle_replay_manifest(int cfd, const char *req, const char *id) {
             first ? "" : ",", slot, slug, costume, anim_slug, costume);
         first = false;
     }
-    if (replay.game_start.stage_id == 32)
+    const char *stage_slug = stage_asset_slug(replay.game_start.stage_id);
+    if (stage_slug)
         o += (size_t)snprintf(json + o, sizeof json - o,
-                             "%s{\"stage\":\"/assets/v4/stages/fd.stage\"}",
-                             first ? "" : ",");
+                             "%s{\"stage\":\"/assets/v4/stages/%s.stage\"}",
+                             first ? "" : ",", stage_slug);
     o += (size_t)snprintf(json + o, sizeof json - o, "]}");
     slp_replay_free(&replay);
     if (o >= sizeof json) {

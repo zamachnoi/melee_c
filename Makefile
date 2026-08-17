@@ -78,10 +78,7 @@ test-http: web-build
 
 cache: $(BIN)/extract_tool
 	@rm -rf cache && mkdir -p cache
-	$(BIN)/extract_tool --iso=fixtures/game.iso --char=fox --out=cache
-	$(BIN)/extract_tool --iso=fixtures/game.iso --char=falco --out=cache
-	$(BIN)/extract_tool --iso=fixtures/game.iso --stage=FD --out=cache
-	$(BIN)/extract_tool --iso=fixtures/game.iso --effects --out=cache
+	$(BIN)/extract_tool --iso=fixtures/game.iso --all --out=cache
 
 test_asset: cache $(BIN)/test_asset
 	$(BIN)/test_asset cache/fox-0.model cache/fox-0.anims cache/fd.stage
