@@ -3,7 +3,7 @@ import { parseModel, type ModelAsset } from './assets/model.js';
 import { parseStage, type StageAsset } from './assets/stage.js';
 import { PoseEvaluator, evaluateStagePose, stageBoneYOffset, type PoseEvaluation } from './animation/pose.js';
 import { ReplayClock } from './replay/clock.js';
-import { ReplaySceneIndex } from './replay/scene.js';
+import { ReplaySceneIndex, FOD_LEFT_START, FOD_RIGHT_START, FOD_STAGE_ID } from './replay/scene.js';
 import { parseTimeline, type Timeline } from './replay/timeline.js';
 import {
   blendGameplayCamera, CAMERA_EYE_RATE, CAMERA_INTEREST_RATE,
@@ -392,10 +392,10 @@ export async function bootWebGL2(): Promise<void> {
 
   /* Fountain of Dreams: side platforms are section 2 bones 2/3 plus a second
      material pass on section 3 bones 1/2.  Replay heights are world Y; the
-     mesh is DAT-local and drawn at stageScale 0.75.  Until the first 0x3F
-     event, use the in-game start heights (left 16.125, right 22.125). */
-  const FOD_LEFT_START = 16.125;
-  const FOD_RIGHT_START = 22.125;
+     mesh is DAT-local and drawn at stageScale 0.75.  0x3F only fires when a
+     platform *changes* height, so seed the in-game spawn heights (left
+     16.125, right 22.125) and ignore non-positive values — bind pose is
+     world y=0 and sinks the mesh into the fountain. */
   const FOD_PLATFORM_SECTIONS = [
     { index: 2, leftBone: 2, rightBone: 3 },
     { index: 3, leftBone: 1, rightBone: 2 },
@@ -409,7 +409,7 @@ export async function bootWebGL2(): Promise<void> {
   let lastFodRight = Number.NaN;
 
   const fodWorldHeight = (value: number, fallback: number): number =>
-    Number.isFinite(value) ? value : fallback;
+    Number.isFinite(value) && value > 0 ? value : fallback;
 
   const setupFodPlatforms = (
     sceneSource: WebGLSceneSource, sections: readonly ModelAsset[],
@@ -417,7 +417,7 @@ export async function bootWebGL2(): Promise<void> {
     fodStageEntries = [];
     lastFodLeft = Number.NaN;
     lastFodRight = Number.NaN;
-    if (!timeline || timeline.stageId !== 2) return;
+    if (!timeline || timeline.stageId !== FOD_STAGE_ID) return;
     const animated: FodStageEntry[] = [];
     for (const spec of FOD_PLATFORM_SECTIONS) {
       const section = sections[spec.index];
