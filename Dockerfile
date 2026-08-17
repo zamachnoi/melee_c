@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Builds the SLP debug viewer for Coolify/Docker deployment.
 #
 # Coolify's Dockerfile build pack does not persist anonymous volumes.
@@ -5,14 +6,10 @@
 # Storage mount at /data/replays so uploads, game.iso, and cache survive
 # rebuilds. The VOLUME line below is only a hint for local `docker run`.
 #
-# Coolify often injects per-deploy --build-arg values (SOURCE_COMMIT,
-# COOLIFY_CONTAINER_NAME) which bust Docker layer cache. Independent
-# stages + BuildKit cache mounts keep apk/npm from re-downloading even
-# then. In Coolify → Application → Advanced, leave "Disable Build Cache"
-# off, and turn off "Include Source Commit in Build" / "Inject Build Args
-# to Dockerfile" so layers can actually be reused.
-
-# syntax=docker/dockerfile:1
+# Coolify may inject per-deploy --build-arg values that bust layer cache.
+# Independent stages + cache mounts keep apk/npm from re-downloading.
+# In Coolify → Advanced: keep "Disable Build Cache" off; turn off
+# "Include Source Commit in Build" and "Inject Build Args to Dockerfile".
 
 FROM alpine:3.20 AS c-build
 RUN --mount=type=cache,target=/etc/apk/cache \
