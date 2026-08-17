@@ -2,6 +2,7 @@ import { BinaryReader, boundedCount } from './binary.js';
 
 export const ASSET_MAGIC = 0x4d444c00;
 export const ASSET_SCHEMA = 4;
+export const ASSET_CACHE_SUBDIR = `v${ASSET_SCHEMA}`;
 
 const LIMITS = Object.freeze({
   bones: 1024,

@@ -9,7 +9,9 @@ import {
   gameplayCameraTarget, meleeStageCamera, panCamera, screenToWorld, zoomCameraAt,
 } from '../../web/dist/renderer/camera.js';
 import { classifyStageSection, isAcceptedFdSection, positionBounds, transformBindPose } from '../../web/dist/renderer/static-pose.js';
-import { evaluateStageAnim, evaluateStagePose, skinPositions, stageBoneYOffset } from '../../web/dist/animation/pose.js';
+import { evaluateStageAnim, evaluateStagePose, evaluateSpline, evaluatePathSpline, skinPositions } from '../../web/dist/animation/pose.js';
+import { fodReplayHeightToWorldTop } from '../../web/dist/replay/scene.js';
+import { cacheFile } from './cache-path.js';
 
 function arrayBuffer(path) {
   const bytes = fs.readFileSync(path);
@@ -28,7 +30,7 @@ function layers(stageId, stage, layer) {
 }
 
 test('bind-pose transform reproduces the C FD section visibility rule', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const stage = parseStage(arrayBuffer(cacheFile('fd.stage')));
   assert.deepEqual(stage.sections.map(isAcceptedFdSection), [false, false, false, true, false, false, false, false, false, false]);
   const bounds = positionBounds(transformBindPose(stage.sections[3]));
   assert.ok(Math.abs(bounds[0] - -85.6) < 0.2);
@@ -37,43 +39,110 @@ test('bind-pose transform reproduces the C FD section visibility rule', () => {
   assert.ok(Math.abs(bounds[4]) < 0.1);
 });
 
+test('stage pose rows bake grGroundParam scale into gameplay space', () => {
+  const stage = parseStage(arrayBuffer(cacheFile('fd.stage')));
+  const section = stage.sections[3];
+  const unscaled = skinPositions(section, evaluateStagePose(section, new Map(), undefined, 1));
+  const scaled = skinPositions(section, evaluateStagePose(section, new Map(), undefined, 0.75));
+  let maximum = 0;
+  for (let i = 0; i < unscaled.length; i++) {
+    maximum = Math.max(maximum, Math.abs(scaled[i] - unscaled[i] * 0.75));
+  }
+  assert.ok(maximum < 1e-4, `scaled pose should be 0.75 of DAT space, delta ${maximum}`);
+});
+
+test('stage pose snaps a bone mesh top to gameplay Y after scale', () => {
+  const stage = parseStage(arrayBuffer(cacheFile('fd.stage')));
+  const section = stage.sections[3];
+  let bone = 0;
+  for (let vertex = 0; vertex < section.vertexCount; vertex++) {
+    if (section.boneIndices[vertex * 4] < section.boneCount) {
+      bone = section.boneIndices[vertex * 4];
+      break;
+    }
+  }
+  const bind = skinPositions(section, evaluateStagePose(section, new Map(), undefined, 0.75));
+  const bindTop = Math.max(...boneTreeY(section, bind, bone));
+  const target = bindTop + 12.5;
+  const posed = skinPositions(section, evaluateStagePose(section, new Map([[bone, target]]), undefined, 0.75));
+  const top = Math.max(...boneTreeY(section, posed, bone));
+  assert.ok(Math.abs(top - target) < 0.01, `snapped top ${top} should be ${target}`);
+});
+
+test('PATH splines sample as polyline, bezier, and cardinal curves', () => {
+  const out = new Float32Array(3);
+  const line = new Float32Array([0, 0, 0, 10, 20, 30]);
+  evaluateSpline(0, 2, 0, line, 0.5, out);
+  assert.deepEqual([...out], [5, 10, 15]);
+  evaluateSpline(0, 2, 0, line, 0, out);
+  assert.deepEqual([...out], [0, 0, 0]);
+  evaluateSpline(0, 2, 0, line, 1, out);
+  assert.deepEqual([...out], [10, 20, 30]);
+  const bezier = new Float32Array([0, 0, 0, 0, 10, 0, 10, 10, 0, 10, 0, 0]);
+  evaluateSpline(1, 2, 0, bezier, 0.5, out);
+  assert.ok(Math.abs(out[0] - 5) < 1e-5 && Math.abs(out[1] - 7.5) < 1e-5);
+  const uneven = new Float32Array([0, 0, 0, 1, 0, 0, 11, 0, 0]);
+  evaluateSpline(0, 3, 0, uneven, 0.5, out);
+  assert.deepEqual([...out], [1, 0, 0], 'parameter 0.5 is the middle CV');
+  evaluatePathSpline(0, 3, 0, uneven, 0.5, out);
+  assert.ok(Math.abs(out[0] - 5.5) < 1e-5, `arc-length 0.5 should be 5.5, got ${out[0]}`);
+});
+
 test('decomp map_id tables pick playable geometry for the six legal stages', () => {
-  const bf = parseStage(arrayBuffer('cache/grnba.stage'));
+  const bf = parseStage(arrayBuffer(cacheFile('grnba.stage')));
   assert.deepEqual(layers(31, bf, 'playable'), [6], 'Battlefield OnInit spawns gobj 6 as the platform');
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fod = parseStage(arrayBuffer(cacheFile('griz.stage')));
   assert.deepEqual(layers(2, fod, 'playable'), [2, 3, 4], 'FoD keeps platforms and fountain');
-  const ys = parseStage(arrayBuffer('cache/grst.stage'));
+  const ys = parseStage(arrayBuffer(cacheFile('grst.stage')));
   assert.deepEqual(layers(8, ys, 'playable'), [2, 3], "Yoshi's Story keeps Randall (2) and the island (3)");
 });
 
 test('decomp map_id tables pick backgrounds the game actually spawns', () => {
-  const bf = parseStage(arrayBuffer('cache/grnba.stage'));
+  const bf = parseStage(arrayBuffer(cacheFile('grnba.stage')));
   const bfBg = layers(31, bf, 'background');
   assert.ok(bfBg.includes(1), 'Battlefield draws gobj 1');
   assert.ok(!bfBg.includes(2) && !bfBg.includes(3) && !bfBg.includes(4) && !bfBg.includes(5),
     'Battlefield does not spawn gobjs 2/4/5; gobj 3 starts hidden');
-  const fd = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const fd = parseStage(arrayBuffer(cacheFile('fd.stage')));
   assert.deepEqual(layers(32, fd, 'background'), [4, 5, 6, 7, 8, 9], 'FD space skybox is map_ids 4–9');
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fod = parseStage(arrayBuffer(cacheFile('griz.stage')));
   assert.ok(layers(2, fod, 'background').includes(1), 'FoD keeps the castle/sky backdrop');
-  const ys = parseStage(arrayBuffer('cache/grst.stage'));
+  const ys = parseStage(arrayBuffer(cacheFile('grst.stage')));
   assert.deepEqual(layers(8, ys, 'background'), [1], "Yoshi's Story skybox is map_id 1");
-  const dl = parseStage(arrayBuffer('cache/grop.stage'));
+  const dl = parseStage(arrayBuffer(cacheFile('grop.stage')));
   assert.ok(layers(28, dl, 'background').includes(3), "Dream Land's painted sky is map_id 3");
   assert.ok(!layers(28, dl, 'playable').includes(3));
   assert.ok(layers(28, dl, 'playable').includes(4) && layers(28, dl, 'playable').includes(5));
 });
 
 test('Pokemon Stadium transformation archives occupy distinct map slots', () => {
-  const fire = parseStage(arrayBuffer('cache/grps1.stage'));
-  const grass = parseStage(arrayBuffer('cache/grps2.stage'));
-  const water = parseStage(arrayBuffer('cache/grps3.stage'));
-  const rock = parseStage(arrayBuffer('cache/grps4.stage'));
+  const fire = parseStage(arrayBuffer(cacheFile('grps1.stage')));
+  const grass = parseStage(arrayBuffer(cacheFile('grps2.stage')));
+  const water = parseStage(arrayBuffer(cacheFile('grps3.stage')));
+  const rock = parseStage(arrayBuffer(cacheFile('grps4.stage')));
   assert.ok(fire.sections[3].vertexCount > 0);
   assert.ok(grass.sections[4].vertexCount > 0);
   assert.ok(rock.sections[6].vertexCount > 0);
   assert.ok(water.sections[9].vertexCount > 0);
 });
+
+function boneTreeY(section, posed, ancestor) {
+  const ys = [];
+  const under = (bone) => {
+    let current = bone;
+    for (let step = 0; step < section.boneCount; step++) {
+      if (current === ancestor) return true;
+      if (current === 0xffff) return false;
+      current = section.boneParents[current];
+    }
+    return false;
+  };
+  for (let vertex = 0; vertex < section.vertexCount; vertex++) {
+    const bone = section.boneIndices[vertex * 4];
+    if (bone < section.boneCount && under(bone)) ys.push(posed[vertex * 3 + 1]);
+  }
+  return ys;
+}
 
 function boneWorldY(section, posed, bone) {
   const ys = [];
@@ -84,33 +153,44 @@ function boneWorldY(section, posed, bone) {
 }
 
 test('FoD platform pose puts mesh tops at the world-space replay height', () => {
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  const fod = parseStage(arrayBuffer(cacheFile('griz.stage')));
   assert.equal(fod.scale, 0.75);
   const leftHeight = 16.125;
   const rightHeight = 22.125;
   const offsets = (leftBone, rightBone) => new Map([
-    [leftBone, stageBoneYOffset(leftHeight, fod.scale)],
-    [rightBone, stageBoneYOffset(rightHeight, fod.scale)],
+    [leftBone, leftHeight],
+    [rightBone, rightHeight],
   ]);
   const check = (section, leftBone, rightBone) => {
-    const posed = skinPositions(section, evaluateStagePose(section, offsets(leftBone, rightBone)));
+    const posed = skinPositions(section, evaluateStagePose(section, offsets(leftBone, rightBone), undefined, fod.scale));
     const left = boneWorldY(section, posed, leftBone);
     const right = boneWorldY(section, posed, rightBone);
     assert.ok(left.length > 0 && right.length > 0);
-    assert.ok(Math.abs(Math.max(...left) * fod.scale - leftHeight) < 0.01);
-    assert.ok(Math.abs(Math.max(...right) * fod.scale - rightHeight) < 0.01);
+    assert.ok(Math.abs(Math.max(...left) - leftHeight) < 0.01);
+    assert.ok(Math.abs(Math.max(...right) - rightHeight) < 0.01);
   };
   check(fod.sections[2], 2, 3);
   check(fod.sections[3], 1, 2);
+  const high = skinPositions(fod.sections[2], evaluateStagePose(fod.sections[2], new Map([[2, 28], [3, 8]]), undefined, fod.scale));
+  assert.ok(Math.abs(Math.max(...boneWorldY(fod.sections[2], high, 2)) - 28) < 0.01);
+  assert.ok(Math.abs(Math.max(...boneWorldY(fod.sections[2], high, 3)) - 8) < 0.01);
+  const movedTop = fodReplayHeightToWorldTop(26.814117431640625);
+  const moved = skinPositions(fod.sections[2], evaluateStagePose(fod.sections[2], new Map([[2, movedTop], [3, 22.125]]), undefined, fod.scale));
+  assert.ok(Math.abs(Math.max(...boneWorldY(fod.sections[2], moved, 2)) - movedTop) < 0.01);
 });
 
 test("Randall's AnimJoint clip moves Yoshi's Story map_id 2", () => {
-  const ys = parseStage(arrayBuffer('cache/grst.stage'));
-  const anims = parseAnimations(arrayBuffer('cache/grst.anims'));
+  const ys = parseStage(arrayBuffer(cacheFile('grst.stage')));
+  const anims = parseAnimations(arrayBuffer(cacheFile('grst.anims')));
   const randall = ys.sections[2];
   const clip = anims.actions[2];
   assert.ok(randall.vertexCount > 0, 'Randall mesh is present');
   assert.ok(clip?.joints.length > 0, 'map_id 2 has an AnimJoint clip');
+  const pathJoint = clip.joints.find(joint => joint.spline || joint.tracks.some(track => track.channel === 4));
+  assert.ok(pathJoint?.spline, 'Randall PATH should keep the HSD spline');
+  assert.equal(pathJoint.spline.type, 0);
+  assert.equal(pathJoint.spline.ncv, 13);
+  assert.equal(pathJoint.spline.points.length, 13 * 3);
   const a = skinPositions(randall, evaluateStageAnim(randall, clip, 0));
   const b = skinPositions(randall, evaluateStageAnim(randall, clip, Math.max(1, Math.floor(clip.endFrame / 4))));
   const bind = transformBindPose(randall);
@@ -121,7 +201,7 @@ test("Randall's AnimJoint clip moves Yoshi's Story map_id 2", () => {
 });
 
 test('stage pose evaluation can fill a reused bone-row buffer', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const stage = parseStage(arrayBuffer(cacheFile('fd.stage')));
   const section = stage.sections.find(value => value.boneCount > 1) ?? stage.sections[0];
   const rows = evaluateStagePose(section, new Map());
   const again = evaluateStagePose(section, new Map([[0, 4]]), rows);
@@ -133,7 +213,7 @@ test('stage pose evaluation can fill a reused bone-row buffer', () => {
 });
 
 test('melee camera uses the authored FD stage height, angle, and zoom', () => {
-  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const stage = parseStage(arrayBuffer(cacheFile('fd.stage')));
   const viewport = { width: 960, height: 720 };
   const mapped = meleeStageCamera(viewport, stage);
   assert.equal(mapped.fov, 30);

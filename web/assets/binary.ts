@@ -1,4 +1,4 @@
-/** Strict big-endian reader shared by schema-4 asset parsers. */
+/** Strict big-endian reader shared by extracted-asset parsers. */
 export class BinaryReader {
   readonly buffer: ArrayBuffer;
   readonly view: DataView;

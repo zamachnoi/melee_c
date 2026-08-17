@@ -285,6 +285,7 @@ void asset_anims_free(asset_anims_t *a) {
             for (uint32_t k = 0; k < ja->track_count; k++)
                 free(ja->tracks[k].keys);
             free(ja->tracks);
+            free(ja->spline_cv);
         }
         free(act->joints);
     }

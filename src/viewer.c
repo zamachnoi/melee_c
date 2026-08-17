@@ -22,7 +22,8 @@
  * Environment:
  *   PORT      HTTP port (default 8080)
  *   SLP_DIR   directory to scan for .slp files (default ./replays)
- *   ASSET_DIR extracted DAT cache (default ./cache, shared via fixtures/cache)
+ *   ASSET_DIR extracted DAT cache root (default ./cache → fixtures/cache).
+ *             Files are read from $ASSET_DIR/v{ASSET_SCHEMA_VERSION}/.
  *   HOST      bind address (default 0.0.0.0)
  */
 
@@ -99,9 +100,18 @@ static char g_web_dir[1024] = "./web";
 
 static char *read_whole_file(const char *path, size_t *len);
 
-static const char *asset_dir(void) {
+static const char *asset_cache_root(void) {
     const char *dir = getenv("ASSET_DIR");
     return dir && dir[0] ? dir : ASSET_DIR;
+}
+
+static const char *asset_dir(void) {
+    static char buf[1200];
+    static int ready;
+    if (ready) return buf;
+    asset_resolve_schema_dir(asset_cache_root(), buf, sizeof buf);
+    ready = 1;
+    return buf;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2219,7 +2229,7 @@ static void ensure_replay_dir(void) {
    new worktrees share fixtures/cache rather than extracting a private copy.
    Absolute ASSET_DIR (Docker, explicit env) is left alone. */
 static void ensure_asset_dir(void) {
-    const char *dir = asset_dir();
+    const char *dir = asset_cache_root();
     struct stat st;
     if (lstat(dir, &st) == 0) return;
     if (strcmp(dir, "cache") != 0 && strcmp(dir, "./cache") != 0) return;

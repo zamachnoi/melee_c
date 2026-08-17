@@ -65,9 +65,13 @@ typecheck:
 web-build:
 	npm run build
 
+ASSET_SCHEMA := $(shell sed -n 's/^#define ASSET_SCHEMA_VERSION //p' src/asset.h)
+ASSET_CACHE := $(if $(wildcard cache/v$(ASSET_SCHEMA)/.),cache/v$(ASSET_SCHEMA),cache)
+FIXTURE_CACHE := $(if $(wildcard fixtures/cache/v$(ASSET_SCHEMA)/.),fixtures/cache/v$(ASSET_SCHEMA),fixtures/cache)
+
 measure-assets:
 	npm run build
-	node tools/measure-assets.mjs fixtures/cache/falco-2.model fixtures/cache/falco-0.anims fixtures/cache/fox-0.model fixtures/cache/fox-0.anims fixtures/cache/fd.stage
+	node tools/measure-assets.mjs $(FIXTURE_CACHE)/falco-2.model $(FIXTURE_CACHE)/falco-0.anims $(FIXTURE_CACHE)/fox-0.model $(FIXTURE_CACHE)/fox-0.anims $(FIXTURE_CACHE)/fd.stage
 
 golden-fixtures: web-build
 	@. ./dev-server.env && DEV_URL="$$DEV_URL" node tools/capture-golden.mjs
@@ -87,8 +91,8 @@ share-cache:
 	done
 
 test_asset: cache $(BIN)/test_asset
-	$(BIN)/test_asset cache/fox-0.model cache/fox-0.anims cache/fd.stage
-	$(BIN)/test_asset cache/falco-2.model cache/falco-0.anims cache/fd.stage
+	$(BIN)/test_asset $(ASSET_CACHE)/fox-0.model $(ASSET_CACHE)/fox-0.anims $(ASSET_CACHE)/fd.stage
+	$(BIN)/test_asset $(ASSET_CACHE)/falco-2.model $(ASSET_CACHE)/falco-0.anims $(ASSET_CACHE)/fd.stage
 
 run: $(BIN)/melee
 	$(BIN)/melee fixtures/vertical.slp

@@ -2,10 +2,11 @@
  * asset.h - runtime asset types + on-disk cache format shared by
  * tools/extract (writer) and src/viewer.c / src/asset.c (reader).
  *
- * The cache is a set of binary files under $ASSET_DIR (default ./cache,
- * shared across worktrees as fixtures/cache), versioned + ISO-fingerprinted
- * via meta.json. See docs/DAT.md, docs/HSD.md,
- * docs/ANIM.md, docs/STAGES.md for the source formats this decodes.
+ * The cache root is $ASSET_DIR (default ./cache, shared as fixtures/cache).
+ * Each schema lives in `v{ASSET_SCHEMA_VERSION}` so a bump keeps older
+ * extracts (v4, v5, …) on disk. The unversioned root is a read fallback when
+ * `vN/` is missing. meta.json inside a version dir fingerprints the ISO.
+ * See docs/DAT.md, docs/HSD.md, docs/ANIM.md, docs/STAGES.md.
  */
 
 #ifndef ASSET_H
@@ -17,9 +18,48 @@
 
 #define ASSET_SCHEMA_VERSION 4
 /* Bump when extract --all writes a new class of files (e.g. stage .anims).
-   Persistent Docker volumes rebuild when meta.json cache_id does not match. */
+   Persistent Docker volumes rebuild when meta.json cache_id does not match.
+   Extract writes into $ASSET_DIR/v{ASSET_SCHEMA_VERSION}/; leave older vN dirs.
+   Unversioned $ASSET_DIR is a read fallback only when `vN/` is missing. */
 #define ASSET_CACHE_ID 1
 #define ASSET_MAGIC 0x4D444C00u /* "MDL\0" for models */
+
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static inline int asset_path_is_schema_dir(const char *dir) {
+    char name[16];
+    const char *slash;
+    if (!dir || !dir[0]) return 0;
+    snprintf(name, sizeof name, "v%u", ASSET_SCHEMA_VERSION);
+    slash = strrchr(dir, '/');
+    return strcmp(slash ? slash + 1 : dir, name) == 0;
+}
+
+/* Directory extract should write. Always `$root/vN`, or `$root` if it already is. */
+static inline void asset_schema_write_dir(const char *root, char *out, size_t out_n) {
+    if (!root || !root[0]) root = "cache";
+    if (asset_path_is_schema_dir(root)) {
+        snprintf(out, out_n, "%s", root);
+        return;
+    }
+    snprintf(out, out_n, "%s/v%u", root, ASSET_SCHEMA_VERSION);
+}
+
+/* Directory the viewer should read. Prefers `$root/vN`, else the unversioned root. */
+static inline const char *asset_resolve_schema_dir(const char *root, char *out, size_t out_n) {
+    struct stat st;
+    if (!root || !root[0]) root = "cache";
+    if (asset_path_is_schema_dir(root)) {
+        snprintf(out, out_n, "%s", root);
+        return out;
+    }
+    snprintf(out, out_n, "%s/v%u", root, ASSET_SCHEMA_VERSION);
+    if (stat(out, &st) == 0 && S_ISDIR(st.st_mode)) return out;
+    snprintf(out, out_n, "%s", root);
+    return out;
+}
 
 /* ---- model (shared by characters and stage sections) ---- */
 
@@ -85,7 +125,7 @@ typedef struct {
 } asset_key_t;
 
 /* track channel ids, matching FigaTrack obj_type for joints:
-   1..3 rot x/y/z, 5..7 trans x/y/z, 8..10 scale x/y/z */
+   1..3 rot x/y/z, 4 PATH u, 5..7 trans x/y/z, 8..10 scale x/y/z */
 typedef struct {
     uint8_t channel;      /* channel id (1..10) */
     uint16_t start_frame;
@@ -97,6 +137,11 @@ typedef struct {
     uint16_t bone_index;
     uint32_t track_count;
     asset_track_t *tracks;
+    uint8_t spline_type;
+    int16_t spline_ncv;
+    uint32_t spline_nvec;
+    float spline_tension;
+    float *spline_cv;     /* 3 * spline_nvec; NULL if this joint has no PATH */
 } asset_joint_anim_t;
 
 typedef struct {

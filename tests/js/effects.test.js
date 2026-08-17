@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import { parseModel } from '../../web/dist/assets/model.js';
+import { transformBindPose } from '../../web/dist/renderer/static-pose.js';
+import { cacheFile } from './cache-path.js';
 import {
   CHAR_FALCO, CHAR_FOX, createHexPrism, createUnitCylinder, createUvSphere,
   effectAssetUrl, fitEffectScale, isFalcoLaser, isFalcoPhantasm, isFirefoxAction,
@@ -98,8 +100,24 @@ test('extracted DAT meshes scale to gameplay radii unless they are already close
   assert.ok(Math.abs(xyExtent(new Float32Array([-0.394, 0.394, 0, 0.394, -0.394, 0])) - 0.394) < 1e-6);
 });
 
+test('shine DAT mesh is camera-facing XY, not fighter Z-forward', () => {
+  const bytes = fs.readFileSync(cacheFile('ef-fx-0.model'));
+  const model = parseModel(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const bind = transformBindPose(model);
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < bind.length; i += 3) {
+    minX = Math.min(minX, bind[i]); maxX = Math.max(maxX, bind[i]);
+    minY = Math.min(minY, bind[i + 1]); maxY = Math.max(maxY, bind[i + 1]);
+    minZ = Math.min(minZ, bind[i + 2]); maxZ = Math.max(maxZ, bind[i + 2]);
+  }
+  const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+  assert.ok(dx > 5 && dy > 5, 'shine spans the XY plane');
+  assert.ok(dz < 0.05, 'shine has no fighter-forward thickness; swapping X/Z stands it on edge');
+});
+
 test('extracted shield is the in-game DAT billboard with a circular bubble texture', () => {
-  const bytes = fs.readFileSync('fixtures/cache/ef-co-11.model');
+  const bytes = fs.readFileSync(cacheFile('ef-co-11.model'));
   const model = parseModel(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   assert.equal(model.vertexCount, 4);
   assert.equal(model.indexCount, 6);

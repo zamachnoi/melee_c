@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 # Point $root/cache at the machine-shared fixtures/cache. Never copy the ISO extract.
+# Schema-versioned extracts live in fixtures/cache/v{N}/; do not delete older vN dirs.
 # Usage: ensure-shared-cache.sh [worktree-root]
 set -eu
 if [ -n "${1:-}" ]; then

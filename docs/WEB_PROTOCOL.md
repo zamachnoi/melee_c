@@ -5,11 +5,12 @@ big-endian. Asset, timeline, and live versions are independent:
 
 | Contract | Version | Definition |
 | --- | ---: | --- |
-| extracted assets | 4 | `ASSET_SCHEMA_VERSION` in `src/asset.h` |
+| extracted assets | 4 | `ASSET_SCHEMA_VERSION` in `src/asset.h`; files in `$ASSET_DIR/v4/` |
 | completed timeline | 1 | `TIMELINE_SCHEMA_VERSION` in `src/protocol.h` |
 | live messages | 1 | `LIVE_PROTOCOL_VERSION` in `src/protocol.h` |
 
-Schema mismatch is an error. A reader may skip unknown trailing data only when
+Schema mismatch is an error. Extract writes `$ASSET_DIR/v{N}/` for the current
+schema so `v4`, `v5`, … can coexist. A reader may skip unknown trailing data only when
 an enclosing offset/length describes it; it must never reinterpret a known
 field using a different schema.
 

@@ -175,7 +175,6 @@ static void eval_pose(const asset_model_t *m, const asset_anims_t *a,
 
     if (action_idx != UINT32_MAX && a) {
         const asset_action_t *act = &a->actions[action_idx];
-        const int ledge_anchored = strstr(act->name, "ACTION_Cliff") != NULL;
         float frame_number=frame<=0.0f?1.0f:frame+1.0f;
         if(act->loop&&act->end_frame>0.0f)
             while(frame_number>act->end_frame)frame_number-=act->end_frame;
@@ -185,25 +184,17 @@ static void eval_pose(const asset_model_t *m, const asset_anims_t *a,
             float scl[3], rot[3], trs[3];
             sample_joint(ja, frame_number, &m->bones[ja->bone_index], scl, rot, trs);
             /* Slippi's post-frame x/y is the fighter's authoritative world
-               root.  Applying figatree root translation as well double-counts
-               locomotion and can put grounded poses through the floor. */
+               root.  Figatree TopN/TransN translation is locomotion already
+               baked into that position; keep rotation and scale only. */
             if (ja->bone_index == 0) {
                 trs[0] = m->bones[0].base[9];
                 trs[1] = m->bones[0].base[10];
                 trs[2] = m->bones[0].base[11];
             }
-            /* Bone 1 is the fighter's TransN joint.  Its Z channel is
-               authored root motion (35 units for dash attack/get-up rolls,
-               40 for tech rolls), but the replay position has already
-               applied that movement.  Cliff actions are the same: Slippi
-               x/y is already the hanging body, not the ledge grab point, so
-               keeping TransN Y/Z would hang the fighter under the stage. */
             if (ja->bone_index == 1) {
+                trs[0] = m->bones[1].base[9];
+                trs[1] = m->bones[1].base[10];
                 trs[2] = m->bones[1].base[11];
-                if (ledge_anchored) {
-                    trs[0] = m->bones[1].base[9];
-                    trs[1] = m->bones[1].base[10];
-                }
             }
             mtx_from_srt(scl, rot, trs, local[ja->bone_index]);
         }

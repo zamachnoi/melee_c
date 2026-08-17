@@ -1,7 +1,7 @@
 import { parseAnimations, type AnimationsAsset } from './assets/anims.js';
 import { parseModel, type ModelAsset } from './assets/model.js';
 import { parseStage, type StageAsset } from './assets/stage.js';
-import { PoseEvaluator, evaluateStageAnim, evaluateStagePose, stageBoneYOffset, type PoseEvaluation } from './animation/pose.js';
+import { PoseEvaluator, evaluateStageAnim, evaluateStagePose, type PoseEvaluation } from './animation/pose.js';
 import { ReplayClock } from './replay/clock.js';
 import { ReplaySceneIndex, FOD_LEFT_START, FOD_RIGHT_START, FOD_STAGE_ID } from './replay/scene.js';
 import { parseTimeline, type Timeline } from './replay/timeline.js';
@@ -427,11 +427,10 @@ export async function bootWebGL2(): Promise<void> {
   const renderCurrent = (): void => { renderer.draw(camera); };
 
   /* Fountain of Dreams: side platforms are section 2 bones 2/3 plus a second
-     material pass on section 3 bones 1/2.  Replay heights are world Y; the
-     mesh is DAT-local and drawn at stageScale 0.75.  0x3F only fires when a
-     platform *changes* height, so seed the in-game spawn heights (left
-     16.125, right 22.125) and ignore non-positive values — bind pose is
-     world y=0 and sinks the mesh into the fountain. */
+     material pass on section 3 bones 1/2.  Scene-index heights are gameplay
+     mesh-top Y (spawn 0x3F is already world; motion 0x3F is JObj local Y).
+     0x3F only fires when a platform *changes* height, so seed the in-game
+     spawn tops (left 16.125, right 22.125) and ignore non-positive values. */
   const FOD_PLATFORM_SECTIONS = [
     { index: 2, leftBone: 2, rightBone: 3 },
     { index: 3, leftBone: 1, rightBone: 2 },
@@ -494,6 +493,7 @@ export async function bootWebGL2(): Promise<void> {
       entry.boneRows = evaluateStageAnim(
         entry.model, entry.action, animFrame,
         entry.boneRows.length ? entry.boneRows : undefined,
+        sceneSource.stageScale,
       );
       entry.poseVersion += 1;
     }
@@ -542,15 +542,13 @@ export async function bootWebGL2(): Promise<void> {
     lastFodLeft = left;
     lastFodRight = right;
     if (!changed && fodStageEntries.every(entry => entry.boneRows.length)) return;
-    const leftOffset = stageBoneYOffset(left, sceneSource.stageScale);
-    const rightOffset = stageBoneYOffset(right, sceneSource.stageScale);
     for (const entry of fodStageEntries) {
       if (entry.leftBone === undefined || entry.rightBone === undefined) continue;
       fodOffsets.clear();
-      fodOffsets.set(entry.leftBone, leftOffset);
-      fodOffsets.set(entry.rightBone, rightOffset);
+      fodOffsets.set(entry.leftBone, left);
+      fodOffsets.set(entry.rightBone, right);
       entry.boneRows = evaluateStagePose(entry.model, fodOffsets, entry.boneRows.length
-        ? entry.boneRows : undefined);
+        ? entry.boneRows : undefined, sceneSource.stageScale);
       entry.poseVersion += 1;
     }
   };
@@ -661,7 +659,7 @@ export async function bootWebGL2(): Promise<void> {
     source.stageState.stadiumEvent = sceneIndex.stadiumEvent[index];
     source.stageState.stadiumType = sceneIndex.stadiumType[index];
     source.stageState.stadiumVisibleType = sceneIndex.stadiumVisibleType[index];
-    updateMapAnims(source, Math.max(0, frame));
+    updateMapAnims(source, frame);
     updateFodPlatforms(source, sceneIndex.fodLeft[index], sceneIndex.fodRight[index]);
     applyAutomaticCamera(index);
     renderCurrent();

@@ -12,7 +12,7 @@ import {
   SHINE_COLOR, SHINE_RADIUS, xyExtent, xyRadius, type EffectModelBank, type GeneratedMesh,
 } from './effects.js';
 import type { Renderer, RenderSize, SceneSnapshot } from './interface.js';
-import { skinPositions } from '../animation/pose.js';
+import { fighterPositionsToGameplay, skinPositions } from '../animation/pose.js';
 import { positionBounds, transformBindPose } from './static-pose.js';
 
 const MOBJ_XLU = 1 << 30;
@@ -37,10 +37,8 @@ uniform mat4 u_viewProjection;
 uniform vec2 u_replayRoot;
 uniform float u_facing;
 uniform float u_modelScale;
-uniform bool u_profile;
 uniform bool u_skinned;
 uniform bool u_billboard;
-uniform bool u_ray;
 uniform bool u_viewBillboard;
 uniform vec3 u_cameraRight;
 uniform vec3 u_cameraUp;
@@ -78,9 +76,7 @@ vec3 posedPosition() {
 void main() {
   vec3 position = posedPosition();
   vec3 world;
-  if (u_profile) {
-    world = vec3(position.z * u_facing + u_replayRoot.x, position.y + u_replayRoot.y, position.x);
-  } else if (u_viewBillboard) {
+  if (u_viewBillboard) {
     vec3 scaled = position * u_modelScale;
     world = vec3(u_replayRoot.x, u_replayRoot.y, 0.0)
       + u_cameraRight * scaled.x
@@ -89,12 +85,10 @@ void main() {
     vec2 dir = dot(u_dir, u_dir) > 0.0001 ? normalize(u_dir) : vec2(1.0, 0.0);
     vec2 perp = vec2(-dir.y, dir.x);
     vec3 scaled = position * u_modelScale;
-    // Item rays (lasers) live in fighter space: Z is length, Y is up, X is depth.
-    vec3 local = u_ray ? vec3(scaled.z, scaled.y, scaled.x) : scaled;
     world = vec3(u_replayRoot.x, u_replayRoot.y, 0.0)
-      + vec3(dir * local.x + perp * local.y, local.z);
+      + vec3(dir * scaled.x + perp * scaled.y, scaled.z);
   } else {
-    world = vec3(position.x, position.y, position.z) * u_modelScale;
+    world = vec3(position.x * u_facing + u_replayRoot.x, position.y + u_replayRoot.y, position.z);
   }
   gl_Position = u_viewProjection * vec4(world, 1.0);
   v_uv = a_uv;
@@ -364,10 +358,8 @@ interface MeshUniforms {
   replayRoot: WebGLUniformLocation;
   facing: WebGLUniformLocation;
   modelScale: WebGLUniformLocation;
-  profile: WebGLUniformLocation;
   skinned: WebGLUniformLocation;
   billboard: WebGLUniformLocation;
-  ray: WebGLUniformLocation;
   viewBillboard: WebGLUniformLocation;
   cameraRight: WebGLUniformLocation;
   cameraUp: WebGLUniformLocation;
@@ -593,10 +585,8 @@ export class WebGL2Renderer implements Renderer {
           replayRoot: uniform(gl, mesh, 'u_replayRoot'),
           facing: uniform(gl, mesh, 'u_facing'),
           modelScale: uniform(gl, mesh, 'u_modelScale'),
-          profile: uniform(gl, mesh, 'u_profile'),
           skinned: uniform(gl, mesh, 'u_skinned'),
           billboard: uniform(gl, mesh, 'u_billboard'),
-          ray: uniform(gl, mesh, 'u_ray'),
           viewBillboard: uniform(gl, mesh, 'u_viewBillboard'),
           cameraRight: uniform(gl, mesh, 'u_cameraRight'),
           cameraUp: uniform(gl, mesh, 'u_cameraUp'),
@@ -660,23 +650,23 @@ export class WebGL2Renderer implements Renderer {
     if (!this.programs || this.lost) return;
     this.destroyMeshes();
     try {
-      this.stageMeshes = source.stageSections.map(model => this.uploadMesh(model, false));
+      this.stageMeshes = source.stageSections.map(model => this.uploadMesh(model, 'stage'));
       this.stageBackgroundMeshes = (source.stageBackgrounds ?? []).map(
-        model => this.uploadMesh(model, false, 'linear'));
+        model => this.uploadMesh(model, 'stage', 'linear'));
       this.stageVariantMeshes = (source.stageVariants ?? []).map(variant => ({
         type: variant.type,
-        meshes: variant.sections.map(model => this.uploadMesh(model, false)),
+        meshes: variant.sections.map(model => this.uploadMesh(model, 'stage')),
       }));
       this.stageAnimatedMeshes = (source.stageAnimated ?? []).map(
-        entry => this.uploadMesh(entry.model, false, 'nearest', true));
-      this.fighterMeshes = source.fighters.map(fighter => this.uploadMesh(fighter.model, true));
+        entry => this.uploadMesh(entry.model, 'stage', 'nearest', true));
+      this.fighterMeshes = source.fighters.map(fighter => this.uploadMesh(fighter.model, 'fighter'));
       const bank = source.effectModels;
       if (bank) {
         for (const [alias, model] of Object.entries(bank.byAlias)) {
-          this.extractedMeshes.set(`alias:${alias}`, this.uploadMesh(model, false, 'linear'));
+          this.extractedMeshes.set(`alias:${alias}`, this.uploadMesh(model, 'effect', 'linear'));
         }
         for (const [id, model] of Object.entries(bank.byItem)) {
-          this.extractedMeshes.set(`item:${id}`, this.uploadMesh(model, false, 'linear'));
+          this.extractedMeshes.set(`item:${id}`, this.uploadMesh(model, 'item', 'linear'));
         }
       }
     } catch (error) {
@@ -718,13 +708,13 @@ export class WebGL2Renderer implements Renderer {
       gl.disable(gl.BLEND);
       gl.depthMask(true);
       for (const mesh of this.stageBackgroundMeshes) {
-        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, { materialPass: 'opaque' });
+        this.drawMesh(mesh, camera, false, 0, 0, 1, 1, { materialPass: 'opaque' });
       }
       this.drawAnimatedLayer(camera, 'background', 'opaque');
       gl.enable(gl.BLEND);
       gl.depthMask(false);
       for (const mesh of this.stageBackgroundMeshes) {
-        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, { materialPass: 'xlu' });
+        this.drawMesh(mesh, camera, false, 0, 0, 1, 1, { materialPass: 'xlu' });
       }
       this.drawAnimatedLayer(camera, 'background', 'xlu');
       gl.depthMask(true);
@@ -733,11 +723,11 @@ export class WebGL2Renderer implements Renderer {
     gl.enable(gl.BLEND);
     if (variant) {
       for (const mesh of variant.meshes) {
-        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
+        this.drawMesh(mesh, camera, false, 0, 0, 1, 1);
       }
     } else {
       for (const mesh of this.stageMeshes) {
-        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
+        this.drawMesh(mesh, camera, false, 0, 0, 1, 1);
       }
     }
     this.drawAnimatedLayer(camera, 'playable');
@@ -800,19 +790,32 @@ export class WebGL2Renderer implements Renderer {
   }
 
   private uploadMesh(
-    model: ModelAsset, profile: boolean, filter: 'nearest' | 'linear' = 'nearest',
-    dynamicPositions = false,
+    model: ModelAsset, space: 'fighter' | 'stage' | 'effect' | 'item',
+    filter: 'nearest' | 'linear' = 'nearest', dynamicPositions = false,
   ): GpuMesh {
     const gl = this.gl;
-    const positions = transformBindPose(model);
-    const bounds = positionBounds(positions);
+    const bind = transformBindPose(model);
+    let gameplay = bind;
+    if (space === 'stage') {
+      const scale = this.source.stageScale;
+      if (scale !== 1) {
+        gameplay = new Float32Array(bind.length);
+        for (let i = 0; i < bind.length; i++) gameplay[i] = bind[i] * scale;
+      }
+    } else if (space === 'item') {
+      /* Lasers/illusion are fighter-space (Z along the shot). Shine/shield
+         stay DAT XY so the billboard faces the camera. */
+      gameplay = fighterPositionsToGameplay(bind);
+    }
+    const bounds = positionBounds(space === 'fighter' ? fighterPositionsToGameplay(bind) : gameplay);
+    const skinned = space === 'fighter';
     const vao = gl.createVertexArray();
     if (!vao) throw new Error('WebGL2 could not allocate a vertex array');
     const buffers: WebGLBuffer[] = [];
     const textures: WebGLTexture[] = [];
     try {
       gl.bindVertexArray(vao);
-      const positionData = profile ? model.positions : positions;
+      const positionData = skinned ? model.positions : gameplay;
       buffers.push(createBuffer(
         gl, gl.ARRAY_BUFFER, positionData,
         dynamicPositions ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW,
@@ -825,32 +828,30 @@ export class WebGL2Renderer implements Renderer {
       buffers.push(createBuffer(gl, gl.ARRAY_BUFFER, model.colors));
       gl.enableVertexAttribArray(2);
       gl.vertexAttribPointer(2, 4, gl.UNSIGNED_BYTE, true, 0, 0);
-      if (profile) {
+      if (skinned) {
         buffers.push(createBuffer(gl, gl.ARRAY_BUFFER, model.weights));
         gl.enableVertexAttribArray(3);
         gl.vertexAttribPointer(3, 4, gl.FLOAT, false, 0, 0);
       }
-      // Integer shader inputs must have an integer-bound attribute even when
-      // the unskinned stage branch does not read it.
       buffers.push(createBuffer(gl, gl.ARRAY_BUFFER, model.boneIndices));
       gl.enableVertexAttribArray(4);
       gl.vertexAttribIPointer(4, 4, gl.UNSIGNED_SHORT, 0, 0);
       buffers.push(createBuffer(gl, gl.ELEMENT_ARRAY_BUFFER, model.indices));
       for (const texture of model.textures) textures.push(this.uploadTexture(texture.width, texture.height, texture.rgba, filter));
       const textureBytes = model.textures.reduce((sum, texture) => sum + texture.rgba.byteLength, 0);
-      const boneTexture = profile ? this.createBoneTexture(model.boneCount) : null;
+      const boneTexture = skinned ? this.createBoneTexture(model.boneCount) : null;
       return {
         vao, buffers, textures, boneTexture,
         positionBuffer: buffers[0],
         skinnedPositions: dynamicPositions ? new Float32Array(model.positions.length) : null,
         uploadedPoseVersion: -1, model,
-        minDepth: profile ? Math.min(-100, bounds[0]) : bounds[2],
-        maxDepth: profile ? Math.max(100, bounds[3]) : bounds[5],
-        xyRadius: xyRadius(positions),
-        xyExtent: xyExtent(positions),
-        gpuBytes: (profile ? model.positions.byteLength + model.weights.byteLength : positions.byteLength) + model.boneIndices.byteLength
+        minDepth: skinned ? Math.min(-100, bounds[2]) : bounds[2],
+        maxDepth: skinned ? Math.max(100, bounds[5]) : bounds[5],
+        xyRadius: xyRadius(gameplay),
+        xyExtent: xyExtent(gameplay),
+        gpuBytes: (skinned ? model.positions.byteLength + model.weights.byteLength : gameplay.byteLength) + model.boneIndices.byteLength
           + model.uvs.byteLength + model.colors.byteLength + model.indices.byteLength + textureBytes
-          + (profile ? model.boneCount * 24 * 4 : 0),
+          + (skinned ? model.boneCount * 24 * 4 : 0),
       };
     } catch (error) {
       gl.deleteVertexArray(vao);
@@ -880,16 +881,16 @@ export class WebGL2Renderer implements Renderer {
         this.uploadSkinnedStagePositions(mesh, entry.boneRows);
         mesh.uploadedPoseVersion = entry.poseVersion;
       }
-      this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, {
+      this.drawMesh(mesh, camera, false, 0, 0, 1, 1, {
         materialPass,
       });
     }
   }
 
   private drawMesh(
-    mesh: GpuMesh, camera: CameraState, profile: boolean,
+    mesh: GpuMesh, camera: CameraState, skinned: boolean,
     rootX: number, rootY: number, facing: number, modelScale: number,
-    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; skinnedStage?: boolean; materialPass?: 'opaque' | 'xlu'; profileItem?: boolean; facing?: number },
+    extra?: { billboard?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; materialPass?: 'opaque' | 'xlu'; facing?: number },
   ): void {
     if (!this.programs || !this.whiteTexture) return;
     const gl = this.gl;
@@ -900,10 +901,8 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform2f(u.replayRoot, rootX, rootY);
     gl.uniform1f(u.facing, (extra?.facing ?? facing) < 0 ? -1 : 1);
     gl.uniform1f(u.modelScale, modelScale);
-    gl.uniform1i(u.profile, profile || extra?.profileItem ? 1 : 0);
-    gl.uniform1i(u.skinned, profile || extra?.skinnedStage ? 1 : 0);
+    gl.uniform1i(u.skinned, skinned ? 1 : 0);
     gl.uniform1i(u.billboard, extra?.billboard ? 1 : 0);
-    gl.uniform1i(u.ray, extra?.ray ? 1 : 0);
     gl.uniform1i(u.viewBillboard, extra?.viewBillboard ? 1 : 0);
     gl.uniform1i(u.mirrorMask, extra?.mirrorMask ? 1 : 0);
     gl.uniform3fv(u.cameraRight, this.cameraRight);
@@ -1100,13 +1099,13 @@ export class WebGL2Renderer implements Renderer {
   private drawExtracted(
     mesh: GpuMesh, originX: number, originY: number, scale: number,
     dirX: number, dirY: number,
-    extra?: { ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; tint?: readonly [number, number, number, number]; profileItem?: boolean; facing?: number },
+    extra?: { billboard?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; tint?: readonly [number, number, number, number]; facing?: number },
   ): void {
     if (!this.hasLastCamera) return;
-    this.drawMesh(mesh, this.lastCamera, false, originX, originY, 1, scale, {
-      billboard: !extra?.viewBillboard, ray: extra?.ray, viewBillboard: extra?.viewBillboard,
+    this.drawMesh(mesh, this.lastCamera, false, originX, originY, extra?.facing ?? 1, scale, {
+      billboard: extra?.viewBillboard ? false : extra?.billboard !== false,
+      viewBillboard: extra?.viewBillboard,
       mirrorMask: extra?.mirrorMask, dirX, dirY, tint: extra?.tint,
-      profileItem: extra?.profileItem, facing: extra?.facing,
     });
   }
 
@@ -1193,7 +1192,7 @@ export class WebGL2Renderer implements Renderer {
         const color = foxLaser ? FOX_LASER_COLOR : FALCO_LASER_COLOR;
         const length = laserLength(item.velocityX, item.velocityY);
         if (extractedItem) {
-          this.drawExtracted(extractedItem, item.x, item.y, 1, dirX, dirY, { ray: true });
+          this.drawExtracted(extractedItem, item.x, item.y, 1, dirX, dirY, { billboard: true });
         } else {
           bindEffectProgram();
           this.drawEffect(this.laserMesh, EffectKind.Laser,
@@ -1205,7 +1204,7 @@ export class WebGL2Renderer implements Renderer {
         const length = Math.max(16, laserLength(item.velocityX, item.velocityY) * 1.4);
         if (extractedItem) {
           this.drawExtracted(extractedItem, item.x, item.y, 1, dirX, dirY, {
-            profileItem: true, facing: item.facing,
+            billboard: false, facing: item.facing,
             tint: [color[0], color[1], color[2], 0.45],
           });
         } else {

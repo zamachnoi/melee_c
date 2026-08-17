@@ -23,8 +23,11 @@ same port is reachable through the machine hostname (for example,
 replays from `replays/` (SLP_DIR) and extracted DAT assets from `cache/`
 (ASSET_DIR). Missing `replays/` and `cache/` dirs are symlinked to the shared
 `fixtures` tree (`fixtures` and `fixtures/cache`) so worktrees do not copy
-`.slp` files or re-extract the ISO. See `src/viewer.c` for env vars (`PORT`,
-`HOST`, `WEB_DIR`, `SLP_DIR`, `ASSET_DIR`).
+`.slp` files or re-extract the ISO. Extracted files live in
+`cache/v{ASSET_SCHEMA_VERSION}/` (currently `v4`); bumping the schema writes a
+new `v5`/`v6`/… folder and leaves older extracts in place. If `vN/` is missing,
+the viewer still reads the unversioned `cache/` root. See
+`src/viewer.c` for env vars (`PORT`, `HOST`, `WEB_DIR`, `SLP_DIR`, `ASSET_DIR`).
 
 Stop this worktree's server with:
 
@@ -49,4 +52,4 @@ inside the new worktree.
 - Multiple worktrees can run simultaneously on different ports.
 - `replays/` and `cache/` are gitignored; they should symlink at `fixtures`
   and `fixtures/cache` (shared on the machine). Do not copy the ISO cache
-  into a worktree.
+  into a worktree. Do not delete older `cache/vN/` directories.
