@@ -985,12 +985,288 @@ static void write_anims_file(const char*dir,const char*name,const asset_anims_t*
     printf("wrote %s: %u actions\n",name,a->action_count);
 }
 
+/* HSD FObjDesc keyframe stream (same opcodes as figatree tracks). */
+static void decode_fobj_keys(const uint8_t*stream,size_t stream_len,
+                             int vfmt,int vshift,int tfmt,int tshift,asset_track_t*tk){
+    size_t cur=0;
+    uint32_t cap=32,nk=0;
+    asset_key_t*keys=malloc(cap*sizeof(asset_key_t));
+    float frame=0.0f;
+    while(cur<stream_len){
+        uint32_t packed=read_packed(stream,&cur,stream_len);
+        uint32_t op=packed&0x0F;
+        if(op==0)break;
+        uint32_t kcount=(packed>>4)+1;
+        for(uint32_t q=0;q<kcount;q++){
+            float val=0,tan=0;
+            if(op==1||op==2||op==3){
+                val=read_packed_value(stream,&cur,stream_len,vfmt,vshift);
+            }else if(op==4){
+                val=read_packed_value(stream,&cur,stream_len,vfmt,vshift);
+                tan=read_packed_value(stream,&cur,stream_len,tfmt,tshift);
+            }else if(op==5){
+                if(nk>0)keys[nk-1].out_tan=read_packed_value(stream,&cur,stream_len,tfmt,tshift);
+                continue;
+            }else if(op==6){
+                read_packed_value(stream,&cur,stream_len,vfmt,vshift);
+                continue;
+            }
+            if(nk==cap){cap*=2;keys=realloc(keys,cap*sizeof(asset_key_t));}
+            asset_key_t*k=&keys[nk++];
+            k->frame=frame;k->value=val;k->in_tan=k->out_tan=tan;
+            k->interp=op==1?ATK_STEP:op==2?ATK_LINEAR:ATK_HERMITE;
+            uint32_t d=read_packed(stream,&cur,stream_len);
+            frame+=(float)d;
+        }
+    }
+    tk->keys=realloc(keys,(nk?nk:1)*sizeof(asset_key_t));
+    tk->key_count=nk;
+}
+
+static void decode_fobj_chain(const dat_t*d,const reloc_idx_t*ri,uint32_t fobj_abs,
+                              asset_track_t**out,uint32_t*count_out){
+    uint32_t cap=8,n=0;
+    asset_track_t*tracks=calloc(cap,sizeof(asset_track_t));
+    uint32_t guard=0;
+    while(fobj_abs&&fobj_abs+0x14<=d->len&&guard++<64){
+        uint32_t fobj_rel=fobj_abs-0x20;
+        uint8_t type=d->bytes[fobj_abs+0x0C];
+        uint8_t vflag=d->bytes[fobj_abs+0x0D];
+        uint8_t tflag=d->bytes[fobj_abs+0x0E];
+        float start=rf32(d->bytes+fobj_abs+0x08);
+        uint32_t length=r32(d->bytes+fobj_abs+0x04);
+        uint32_t ad=rdptr(d,ri,fobj_rel,0x10);
+        if(n==cap){cap*=2;tracks=realloc(tracks,cap*sizeof(asset_track_t));}
+        asset_track_t*tk=&tracks[n++];
+        memset(tk,0,sizeof*tk);
+        tk->channel=type;
+        tk->start_frame=(uint16_t)(start<0?0:start>65535?65535:(uint32_t)start);
+        if(ad){
+            size_t stream_len=length;
+            if(stream_len==0||ad+stream_len>d->len)stream_len=node_span_len(d,ri,ad);
+            if(stream_len==0||ad+stream_len>d->len)stream_len=d->len>ad?d->len-ad:0;
+            decode_fobj_keys(d->bytes+ad,stream_len,(vflag>>5)&7,vflag&0x1F,
+                             (tflag>>5)&7,tflag&0x1F,tk);
+        }
+        fobj_abs=rdptr(d,ri,fobj_rel,0);
+    }
+    *out=tracks;*count_out=n;
+}
+
+#define JOBJ_SPLINE_FLAG (1u<<14)
+
+static void spl_eval(int type,int ncv,float tension,const float*cv,float u,float*out){
+    if(ncv<1){out[0]=out[1]=out[2]=0;return;}
+    if(u<=0.f){out[0]=cv[0];out[1]=cv[1];out[2]=cv[2];return;}
+    if(u>=1.f){
+        int last=ncv-1;
+        if(type==1)last=last*3;
+        out[0]=cv[last*3];out[1]=cv[last*3+1];out[2]=cv[last*3+2];
+        return;
+    }
+    float scaled=u*(float)(ncv-1);
+    int idx=(int)scaled;
+    float t=scaled-(float)idx;
+    const float*a,*b;
+    if(type==0){
+        a=cv+idx*3;b=cv+(idx+1)*3;
+        out[0]=a[0]+t*(b[0]-a[0]);out[1]=a[1]+t*(b[1]-a[1]);out[2]=a[2]+t*(b[2]-a[2]);
+        return;
+    }
+    if(type==1){
+        const float*cp=cv+idx*9;
+        float u1=1.f-t,t2=t*t,u12=u1*u1;
+        float b0=u12*u1,b1=3.f*t*u12,b2=3.f*t2*u1,b3=t2*t;
+        out[0]=cp[0]*b0+cp[3]*b1+cp[6]*b2+cp[9]*b3;
+        out[1]=cp[1]*b0+cp[4]*b1+cp[7]*b2+cp[10]*b3;
+        out[2]=cp[2]*b0+cp[5]*b1+cp[8]*b2+cp[11]*b3;
+        return;
+    }
+    /* type 2 bspline / type 3 cardinal: 4-point window */
+    const float*cp=cv+idx*3;
+    if(type==2){
+        float t2=t*t,t3=t2*t,u1=1.f-t,k=1.f/6.f;
+        float b0=k*u1*u1*u1,b1=k*(4.f+(3.f*t3-6.f*t2)),b2=k*(3.f*(-t3+t2+t)+1.f),b3=k*t3;
+        out[0]=cp[0]*b0+cp[3]*b1+cp[6]*b2+cp[9]*b3;
+        out[1]=cp[1]*b0+cp[4]*b1+cp[7]*b2+cp[10]*b3;
+        out[2]=cp[2]*b0+cp[5]*b1+cp[8]*b2+cp[11]*b3;
+        return;
+    }
+    float t2=t*t,t3=t2*t;
+    float c0=tension*(-t3+2.f*t2-t);
+    float c1=((2.f-tension)*t3)+((tension-3.f)*t2)+1.f;
+    float c2=((tension-2.f)*t3)+((3.f-(2.f*tension))*t2)+(tension*t);
+    float c3=tension*(t3-t2);
+    out[0]=cp[0]*c0+cp[3]*c1+cp[6]*c2+cp[9]*c3;
+    out[1]=cp[1]*c0+cp[4]*c1+cp[7]*c2+cp[10]*c3;
+    out[2]=cp[2]*c0+cp[5]*c1+cp[8]*c2+cp[11]*c3;
+}
+
+static int load_joint_spline(const dat_t*d,const reloc_idx_t*ri,uint32_t joint_abs,
+                             int*type,int*ncv,float*tension,float**cv_out){
+    if(!joint_abs||joint_abs+0x14>d->len)return -1;
+    uint32_t flags=r32(d->bytes+joint_abs+4);
+    if(!(flags&JOBJ_SPLINE_FLAG))return -1;
+    uint32_t spline=rdptr(d,ri,joint_abs-0x20,0x10);
+    if(!spline||spline+0x18>d->len)return -1;
+    *type=d->bytes[spline];
+    *ncv=(int16_t)r16(d->bytes+spline+2);
+    *tension=rf32(d->bytes+spline+4);
+    if(*ncv<2||*ncv>256)return -1;
+    uint32_t cv=rdptr(d,ri,spline-0x20,8);
+    if(!cv)return -1;
+    int nvec=*type==1?(*ncv)*3:(*ncv)+3;
+    if(cv+(uint32_t)nvec*12>d->len)nvec=*ncv;
+    if(cv+(uint32_t)nvec*12>d->len)return -1;
+    float*pts=malloc((size_t)nvec*3*sizeof(float));
+    for(int i=0;i<nvec*3;i++)pts[i]=rf32(d->bytes+cv+(uint32_t)i*4);
+    *cv_out=pts;
+    return 0;
+}
+
+static float sample_keys_c(const asset_track_t*tk,float frame){
+    if(!tk->key_count)return 0;
+    const asset_key_t*keys=tk->keys;
+    if(frame<=keys[0].frame)return keys[0].value;
+    if(frame>=keys[tk->key_count-1].frame)return keys[tk->key_count-1].value;
+    uint32_t lo=0,hi=tk->key_count-1;
+    while(lo+1<hi){uint32_t m=(lo+hi)>>1;if(keys[m].frame<=frame)lo=m;else hi=m;}
+    float span=keys[hi].frame-keys[lo].frame;
+    float t=span>0?(frame-keys[lo].frame)/span:0;
+    if(keys[lo].interp==ATK_STEP)return keys[lo].value;
+    return keys[lo].value+(keys[hi].value-keys[lo].value)*t;
+}
+
+static void bake_path_track(const dat_t*d,const reloc_idx_t*ri,uint32_t aobj_abs,
+                            float end_frame,asset_track_t**tracks,uint32_t*ntrack){
+    asset_track_t*path=NULL;
+    for(uint32_t i=0;i<*ntrack;i++)if((*tracks)[i].channel==4){path=&(*tracks)[i];break;}
+    if(!path||!aobj_abs)return;
+    uint32_t joint=rdptr(d,ri,aobj_abs-0x20,0x0C);
+    int type=0,ncv=0;float tension=0,*cv=NULL;
+    if(load_joint_spline(d,ri,joint,&type,&ncv,&tension,&cv))return;
+    int samples=(int)(end_frame>8.f?end_frame/4.f:8.f);
+    if(samples<8)samples=8;
+    if(samples>256)samples=256;
+    asset_track_t xyz[3];
+    memset(xyz,0,sizeof xyz);
+    xyz[0].channel=5;xyz[1].channel=6;xyz[2].channel=7;
+    for(int c=0;c<3;c++){
+        xyz[c].keys=calloc((size_t)samples,sizeof(asset_key_t));
+        xyz[c].key_count=(uint32_t)samples;
+    }
+    for(int i=0;i<samples;i++){
+        float frame=samples==1?0.f:(float)i*end_frame/(float)(samples-1);
+        float u=sample_keys_c(path,frame-path->start_frame);
+        if(u<0)u=0;
+        if(u>1)u=1;
+        float p[3];spl_eval(type,ncv,tension,cv,u,p);
+        for(int c=0;c<3;c++){
+            asset_key_t*k=&xyz[c].keys[i];
+            k->frame=frame;k->value=p[c];k->interp=ATK_LINEAR;
+        }
+    }
+    free(cv);
+    /* drop PATH tracks and append baked TRS */
+    uint32_t kept=0;
+    for(uint32_t i=0;i<*ntrack;i++){
+        if((*tracks)[i].channel==4){free((*tracks)[i].keys);continue;}
+        (*tracks)[kept++]=(*tracks)[i];
+    }
+    *tracks=realloc(*tracks,(kept+3)*sizeof(asset_track_t));
+    memcpy(*tracks+kept,xyz,3*sizeof(asset_track_t));
+    *ntrack=kept+3;
+}
+
+typedef struct{
+    const dat_t*d;
+    const reloc_idx_t*ri;
+    asset_action_t*act;
+    uint32_t visited[512];
+    uint32_t nvisited;
+}aj_walk_t;
+
+static bool aj_seen(aj_walk_t*w,uint32_t abs){
+    for(uint32_t i=0;i<w->nvisited;i++)if(w->visited[i]==abs)return true;
+    if(w->nvisited<512)w->visited[w->nvisited++]=abs;
+    return false;
+}
+
+static void walk_animjoint(aj_walk_t*w,uint32_t jobj_rel,uint32_t aj_abs,uint32_t*bone){
+    if(!jobj_rel||*bone>=512)return;
+    uint16_t bone_index=(uint16_t)(*bone)++;
+    uint32_t child_aj=0,next_aj=0;
+    if(aj_abs&&aj_abs+0x14<=w->d->len&&!aj_seen(w,aj_abs)){
+        uint32_t aj_rel=aj_abs-0x20;
+        child_aj=rdptr(w->d,w->ri,aj_rel,0);
+        next_aj=rdptr(w->d,w->ri,aj_rel,4);
+        uint32_t aobj=rdptr(w->d,w->ri,aj_rel,8);
+        if(aobj&&aobj+0x10<=w->d->len){
+            uint32_t aflags=r32(w->d->bytes+aobj);
+            float end=rf32(w->d->bytes+aobj+4);
+            if(end>w->act->end_frame)w->act->end_frame=end;
+            if(aflags&0x20000000)w->act->loop=true;
+            uint32_t fobj=rdptr(w->d,w->ri,aobj-0x20,8);
+            asset_track_t*tracks=NULL;uint32_t ntrack=0;
+            decode_fobj_chain(w->d,w->ri,fobj,&tracks,&ntrack);
+            bake_path_track(w->d,w->ri,aobj,end,&tracks,&ntrack);
+            if(ntrack){
+                w->act->joints=realloc(w->act->joints,(w->act->joint_count+1)*sizeof(asset_joint_anim_t));
+                asset_joint_anim_t*ja=&w->act->joints[w->act->joint_count++];
+                ja->bone_index=bone_index;
+                ja->track_count=ntrack;
+                ja->tracks=tracks;
+            }else{
+                free(tracks);
+            }
+        }
+    }
+    const uint8_t*j=dat_at(w->d,jobj_rel);
+    if(!j)return;
+    uint32_t child_j=r32(j+0x08),next_j=r32(j+0x0C);
+    if(child_j)walk_animjoint(w,child_j,child_aj,bone);
+    if(next_j)walk_animjoint(w,next_j,next_aj,bone);
+}
+
+static void decode_map_anim(const dat_t*d,const reloc_idx_t*ri,uint32_t group_rel,
+                            uint32_t root_jobj_rel,uint32_t map_id,asset_action_t*act){
+    memset(act,0,sizeof*act);
+    snprintf(act->name,sizeof act->name,"map%u",map_id);
+    if(!root_jobj_rel)return;
+    uint32_t ajp=rdptr(d,ri,group_rel,0x04);
+    uint32_t aj0=ajp?rdptr(d,ri,ajp-0x20,0):0;
+    uint32_t flags=rdptr(d,ri,group_rel,0x28);
+    if(flags&&flags<d->len&&d->bytes[flags])act->loop=true;
+    if(!aj0)return;
+    aj_walk_t w={.d=d,.ri=ri,.act=act};
+    uint32_t bone=0;
+    walk_animjoint(&w,root_jobj_rel,aj0,&bone);
+}
+
+static void free_action(asset_action_t*act){
+    if(!act)return;
+    for(uint32_t j=0;j<act->joint_count;j++){
+        for(uint32_t k=0;k<act->joints[j].track_count;k++)free(act->joints[j].tracks[k].keys);
+        free(act->joints[j].tracks);
+    }
+    free(act->joints);
+    act->joints=NULL;act->joint_count=0;
+}
+
+static void free_anims_contents(asset_anims_t*a){
+    if(!a)return;
+    for(uint32_t i=0;i<a->action_count;i++)free_action(&a->actions[i]);
+    free(a->actions);
+    a->actions=NULL;a->action_count=0;
+}
+
 /* ================================================================== */
 /* Stage decoder                                                      */
 /* ================================================================== */
 
-static int decode_stage(const dat_t*d,asset_stage_t*st){
+static int decode_stage(const dat_t*d,asset_stage_t*st,asset_anims_t*anims){
     memset(st,0,sizeof*st);
+    if(anims)memset(anims,0,sizeof*anims);
     uint32_t map_rel=0,gp_rel=0,plit_rel=0;
     for(uint32_t i=0;i<d->root_count;i++){
         uint32_t data_off=r32(d->bytes+d->roots_start+(size_t)i*8);
@@ -1006,22 +1282,31 @@ static int decode_stage(const dat_t*d,asset_stage_t*st){
     st->scale=rf32(gp+0x00);
     st->cam_pos[0]=rf32(gp+0x50);st->cam_pos[1]=rf32(gp+0x54);st->cam_pos[2]=rf32(gp+0x58);
     st->cam_fov=rf32(gp+0x5C);st->cam_vert=rf32(gp+0x60);st->cam_horiz=rf32(gp+0x64);
-    /* map_head: model groups at +0x08 (ptr,count) */
+    /* map_head: model groups at +0x08 (ptr,count).  Section index == map_id. */
     const uint8_t*mh=dat_at(d,map_rel);
     uint32_t mg_rel=r32(mh+0x08),mg_count=r32(mh+0x0C);
-    if(mg_rel&&mg_count<64){
+    reloc_idx_t ri;reloc_build(d,&ri);
+    if(mg_rel&&mg_count<256){
         st->sections=calloc(mg_count,sizeof(asset_model_t));
-        st->section_count=0;
+        st->section_count=mg_count;
+        if(anims){
+            anims->actions=calloc(mg_count,sizeof(asset_action_t));
+            anims->action_count=mg_count;
+        }
         for(uint32_t i=0;i<mg_count;i++){
             uint32_t gabs=dat_abs(d,mg_rel)+i*0x34;
             if(gabs+0x34>d->len)continue;
+            uint32_t group_rel=gabs-0x20;
             uint32_t root_jobj_rel=r32(d->bytes+gabs);
-            if(!root_jobj_rel)continue;
-            asset_model_t*m=build_model(d,root_jobj_rel,NULL);
-            st->sections[st->section_count++]=*m;
-            free(m);
+            if(root_jobj_rel){
+                asset_model_t*m=build_model(d,root_jobj_rel,NULL);
+                st->sections[i]=*m;
+                free(m);
+            }
+            if(anims)decode_map_anim(d,&ri,group_rel,root_jobj_rel,i,&anims->actions[i]);
         }
     }
+    free(ri.offs);
     /* lights from map_plit */
     if(plit_rel){
         st->lights=malloc(8*sizeof(asset_light_t));
@@ -1694,15 +1979,25 @@ int main(int argc,char**argv){
                 dat_t sd;
                 if(dat_open(iso_bytes+dats.items[i].offset,dats.items[i].size,&sd))continue;
                 asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
-                if(decode_stage(&sd,st)==0){
+                asset_anims_t anims={0};
+                if(decode_stage(&sd,st,&anims)==0){
                     char name[256];int n=0;
                     for(const char*q=bn;*q&&*q!='.';q++)name[n++]=tolower((unsigned char)*q);
                     snprintf(name+n,sizeof name-(size_t)n,".stage");
                     write_stage_file(out,name,st);
-                    if(strcasecmp(bn,"GrNLa.dat")==0)write_stage_file(out,"fd.stage",st);
+                    memcpy(name+n,".anims",7);
+                    write_anims_file(out,name,&anims);
+                    if(strcasecmp(bn,"GrNLa.dat")==0){
+                        write_stage_file(out,"fd.stage",st);
+                        write_anims_file(out,"fd.anims",&anims);
+                    }
+                    uint32_t animated=0;
+                    for(uint32_t a=0;a<anims.action_count;a++)if(anims.actions[a].joint_count)animated++;
+                    if(animated)printf("  %s: %u/%u map clips\n",bn,animated,anims.action_count);
                 }else{
                     printf("stage decode failed: %s\n",bn);
                 }
+                free_anims_contents(&anims);
                 free(st->sections);
                 free(st->lights);
                 free(st);
@@ -1715,11 +2010,14 @@ int main(int argc,char**argv){
                 dat_t sd;
                 if(dat_open(iso_bytes+sf->offset,sf->size,&sd))die("stage dat");
                 asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
-                if(decode_stage(&sd,st)==0){
+                asset_anims_t anims={0};
+                if(decode_stage(&sd,st,&anims)==0){
                     write_stage_file(out,"fd.stage",st);
+                    write_anims_file(out,"fd.anims",&anims);
                 }else{
                     printf("stage decode failed\n");
                 }
+                free_anims_contents(&anims);
             }
         }
     }

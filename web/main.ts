@@ -1,7 +1,7 @@
 import { parseAnimations, type AnimationsAsset } from './assets/anims.js';
 import { parseModel, type ModelAsset } from './assets/model.js';
 import { parseStage, type StageAsset } from './assets/stage.js';
-import { PoseEvaluator, evaluateStagePose, stageBoneYOffset, type PoseEvaluation } from './animation/pose.js';
+import { PoseEvaluator, evaluateStageAnim, evaluateStagePose, stageBoneYOffset, type PoseEvaluation } from './animation/pose.js';
 import { ReplayClock } from './replay/clock.js';
 import { ReplaySceneIndex } from './replay/scene.js';
 import { parseTimeline, type Timeline } from './replay/timeline.js';
@@ -13,7 +13,7 @@ import {
   type CameraMode, type CameraState, type CameraSubject, type CameraViewport,
   type GameplayCameraTarget,
 } from './renderer/camera.js';
-import { isStageSection } from './renderer/static-pose.js';
+import { classifyStageSection, stageMapAnimates } from './renderer/static-pose.js';
 import {
   EFFECT_ALIAS_KEYS, effectAssetUrl, parseEffectCatalog,
   type EffectCatalog, type EffectModelBank,
@@ -28,7 +28,7 @@ export { parseAnimations } from './assets/anims.js';
 export { parseStage } from './assets/stage.js';
 
 interface ReplayListItem { id: string; name: string; file: string }
-interface ManifestAsset { slot?: number; model?: string; animations?: string; stage?: string }
+interface ManifestAsset { slot?: number; model?: string; animations?: string; stage?: string; stadiumType?: number }
 interface FighterAsset extends ManifestAsset { slot: number; model: string; animations: string }
 interface ReplayManifest {
   id: string; name: string; startFrame: number; endFrame: number; stageId: number;
@@ -146,8 +146,8 @@ export async function bootWebGL2(): Promise<void> {
   let hudEntries: HudEntry[] = [];
   let clock: ReplayClock | null = null;
   let source: WebGLSceneSource = {
-    stageSections: [], stageScale: 1, fighters: [], items: [], itemStart: 0, itemEnd: 0,
-    stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
+    stageSections: [], stageBackgrounds: [], stageVariants: [], stageScale: 1, fighters: [], items: [], itemStart: 0, itemEnd: 0,
+    stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1, stadiumVisibleType: -1 },
   };
   let frame = 0;
   let camera: CameraState = createCameraState();
@@ -400,16 +400,68 @@ export async function bootWebGL2(): Promise<void> {
     { index: 2, leftBone: 2, rightBone: 3 },
     { index: 3, leftBone: 1, rightBone: 2 },
   ] as const;
-  type FodStageEntry = {
+  type StageAnimEntry = {
     model: ModelAsset; boneRows: Float32Array; poseVersion: number;
-    leftBone: number; rightBone: number;
+    layer: 'background' | 'playable';
+    action?: AnimationsAsset['actions'][number];
+    leftBone?: number; rightBone?: number;
   };
-  let fodStageEntries: FodStageEntry[] = [];
+  let mapAnimEntries: StageAnimEntry[] = [];
+  let fodStageEntries: StageAnimEntry[] = [];
   let lastFodLeft = Number.NaN;
   let lastFodRight = Number.NaN;
 
   const fodWorldHeight = (value: number, fallback: number): number =>
     Number.isFinite(value) ? value : fallback;
+
+  const publishStageAnimated = (sceneSource: WebGLSceneSource): void => {
+    const fodModels = new Set(fodStageEntries.map(entry => entry.model));
+    sceneSource.stageAnimated = [
+      ...mapAnimEntries.filter(entry => !fodModels.has(entry.model)),
+      ...fodStageEntries,
+    ];
+  };
+
+  const setupStageSections = (
+    sceneSource: WebGLSceneSource,
+    sections: readonly ModelAsset[],
+    animations: AnimationsAsset | null,
+    stageId: number,
+  ): void => {
+    const playable: ModelAsset[] = [];
+    const backgrounds: ModelAsset[] = [];
+    const animated: StageAnimEntry[] = [];
+    for (let mapId = 0; mapId < sections.length; mapId++) {
+      const model = sections[mapId];
+      const layer = classifyStageSection(stageId, mapId, model);
+      if (layer === 'skip') continue;
+      const action = animations?.actions[mapId];
+      if (stageMapAnimates(stageId, mapId) && action?.joints.length) {
+        animated.push({
+          model, boneRows: new Float32Array(0), poseVersion: 0, layer, action,
+        });
+      } else if (layer === 'background') {
+        backgrounds.push(model);
+      } else {
+        playable.push(model);
+      }
+    }
+    sceneSource.stageSections = playable;
+    sceneSource.stageBackgrounds = backgrounds;
+    mapAnimEntries = animated;
+    publishStageAnimated(sceneSource);
+    updateMapAnims(sceneSource, 0);
+  };
+
+  const updateMapAnims = (sceneSource: WebGLSceneSource, animFrame: number): void => {
+    for (const entry of mapAnimEntries) {
+      entry.boneRows = evaluateStageAnim(
+        entry.model, entry.action, animFrame,
+        entry.boneRows.length ? entry.boneRows : undefined,
+      );
+      entry.poseVersion += 1;
+    }
+  };
 
   const setupFodPlatforms = (
     sceneSource: WebGLSceneSource, sections: readonly ModelAsset[],
@@ -417,22 +469,28 @@ export async function bootWebGL2(): Promise<void> {
     fodStageEntries = [];
     lastFodLeft = Number.NaN;
     lastFodRight = Number.NaN;
-    if (!timeline || timeline.stageId !== 2) return;
-    const animated: FodStageEntry[] = [];
+    if (!timeline || timeline.stageId !== 2) {
+      publishStageAnimated(sceneSource);
+      return;
+    }
+    const animated: StageAnimEntry[] = [];
     for (const spec of FOD_PLATFORM_SECTIONS) {
       const section = sections[spec.index];
       if (!section?.vertexCount) continue;
       animated.push({
         model: section, boneRows: new Float32Array(0), poseVersion: 0,
-        leftBone: spec.leftBone, rightBone: spec.rightBone,
+        layer: 'playable', leftBone: spec.leftBone, rightBone: spec.rightBone,
       });
     }
-    if (!animated.length) return;
+    if (!animated.length) {
+      publishStageAnimated(sceneSource);
+      return;
+    }
     const skip = new Set(animated.map(entry => entry.model));
     sceneSource.stageSections = sceneSource.stageSections.filter(
       candidate => !skip.has(candidate));
     fodStageEntries = animated;
-    sceneSource.stageAnimated = fodStageEntries;
+    publishStageAnimated(sceneSource);
     updateFodPlatforms(sceneSource, Number.NaN, Number.NaN);
   };
 
@@ -451,6 +509,7 @@ export async function bootWebGL2(): Promise<void> {
     const leftOffset = stageBoneYOffset(left, sceneSource.stageScale);
     const rightOffset = stageBoneYOffset(right, sceneSource.stageScale);
     for (const entry of fodStageEntries) {
+      if (entry.leftBone === undefined || entry.rightBone === undefined) continue;
       fodOffsets.clear();
       fodOffsets.set(entry.leftBone, leftOffset);
       fodOffsets.set(entry.rightBone, rightOffset);
@@ -463,7 +522,8 @@ export async function bootWebGL2(): Promise<void> {
   const updateDebug = (index: number): void => {
     if (!debugVisible || !timeline) return;
     let text = `frame ${frame} | items ${currentItemCount} | stage FoD ${source.stageState.fodLeft}/${source.stageState.fodRight}`;
-    text += ` | whispy ${source.stageState.whispyDirection} | stadium ${source.stageState.stadiumEvent}:${source.stageState.stadiumType}`;
+    text += ` | mapAnims ${mapAnimEntries.length}`;
+    text += ` | whispy ${source.stageState.whispyDirection} | stadium ${source.stageState.stadiumEvent}:${source.stageState.stadiumType}/${source.stageState.stadiumVisibleType}`;
     for (const runtime of runtimes) {
       const slot = timeline.slots[runtime.slot];
       const pose = runtime.pose;
@@ -548,6 +608,8 @@ export async function bootWebGL2(): Promise<void> {
     source.stageState.whispyDirection = sceneIndex.whispyDirection[index];
     source.stageState.stadiumEvent = sceneIndex.stadiumEvent[index];
     source.stageState.stadiumType = sceneIndex.stadiumType[index];
+    source.stageState.stadiumVisibleType = sceneIndex.stadiumVisibleType[index];
+    updateMapAnims(source, Math.max(0, frame));
     updateFodPlatforms(source, sceneIndex.fodLeft[index], sceneIndex.fodRight[index]);
     applyAutomaticCamera(index);
     renderCurrent();
@@ -725,12 +787,14 @@ export async function bootWebGL2(): Promise<void> {
     loadedWireBytes = 0; assetWarnings = [];
     status.classList.remove('error'); status.textContent = 'Loading manifest…';
     try {
-      const manifestResponse = await trackedFetch(`/api/replays/${id}/manifest`, { signal: controller.signal });
+      const manifestResponse = await trackedFetch(`/api/replays/${id}/manifest?s=4`, { signal: controller.signal });
       manifest = await manifestResponse.json() as ReplayManifest;
       const fighterAssets = manifest.assets.filter((value): value is FighterAsset =>
         typeof value.model === 'string' && typeof value.animations === 'string' && value.slot !== undefined)
         .sort((a, b) => a.slot - b.slot);
-      const stageAsset = manifest.assets.find(value => typeof value.stage === 'string');
+      const stageAssets = manifest.assets.filter(value => typeof value.stage === 'string');
+      const stageAsset = stageAssets.find(value => value.stadiumType === undefined) ?? stageAssets[0];
+      const variantAssets = stageAssets.filter(value => typeof value.stadiumType === 'number');
       status.textContent = 'Loading complete replay scene and reusable assets…';
       const timelinePromise = (async () => {
         const response = await trackedFetch(manifest!.timelineUrl, { signal: controller.signal });
@@ -738,19 +802,32 @@ export async function bootWebGL2(): Promise<void> {
         return { timeline: parseTimeline(buffer), wireBytes: buffer.byteLength };
       })();
       const fightersPromise = Promise.all(fighterAssets.map(loadFighterAsset));
-      const stagePromise: Promise<CachedResult<StageAsset> | null> = stageAsset?.stage
-        ? loadCached(stageAsset.stage, stageCache, stagePending, parseStage).catch(error => {
+      const loadStage = (url: string): Promise<CachedResult<StageAsset> | null> =>
+        loadCached(url, stageCache, stagePending, parseStage).catch(error => {
           assetWarnings.push(`stage unavailable: ${errorMessage(error)}`); return null;
+        });
+      const stagePromise: Promise<CachedResult<StageAsset> | null> = stageAsset?.stage
+        ? loadStage(stageAsset.stage) : Promise.resolve(null);
+      const stageAnimsPromise: Promise<CachedResult<AnimationsAsset> | null> = stageAsset?.animations
+        ? loadCached(stageAsset.animations, animationCache, animationPending, parseAnimations).catch(error => {
+          assetWarnings.push(`stage animations unavailable: ${errorMessage(error)}`); return null;
         })
         : Promise.resolve(null);
+      const variantsPromise = Promise.all(variantAssets.map(async asset => {
+        const loaded = await loadStage(asset.stage!);
+        if (!loaded) return null;
+        return { type: asset.stadiumType as number, asset: loaded.asset, wireBytes: loaded.wireBytes };
+      }));
       const effectsPromise = timelinePromise.then(({ timeline }) => loadEffectBank(timeline));
-      const [timelineResult, loadedFighters, loadedStage, effectResult] = await Promise.all(
-        [timelinePromise, fightersPromise, stagePromise, effectsPromise]);
+      const [timelineResult, loadedFighters, loadedStage, loadedStageAnims, loadedVariants, effectResult] = await Promise.all(
+        [timelinePromise, fightersPromise, stagePromise, stageAnimsPromise, variantsPromise, effectsPromise]);
       if (controller.signal.aborted) return;
       timeline = timelineResult.timeline;
       sceneIndex = new ReplaySceneIndex(timeline);
-      loadedWireBytes = timelineResult.wireBytes + (loadedStage?.wireBytes ?? 0) + effectResult.wireBytes;
+      loadedWireBytes = timelineResult.wireBytes + (loadedStage?.wireBytes ?? 0)
+        + (loadedStageAnims?.wireBytes ?? 0) + effectResult.wireBytes;
       for (const loaded of loadedFighters) loadedWireBytes += loaded.wireBytes;
+      for (const variant of loadedVariants) if (variant) loadedWireBytes += variant.wireBytes;
       for (const loaded of loadedFighters) assetWarnings.push(...loaded.warnings);
       if (!stageAsset?.stage) assetWarnings.push(`stage asset missing for ${manifest.stageName}`);
 
@@ -782,21 +859,28 @@ export async function bootWebGL2(): Promise<void> {
       runtimeBySlot = Array(8).fill(null) as Array<FighterRuntime | null>;
       for (const runtime of runtimes) runtimeBySlot[runtime.slot] = runtime;
       const fighters = runtimes.flatMap(runtime => runtime.source ? [runtime.source] : []);
-      let stageSections: readonly ModelAsset[] = [];
-      let stageScale = 1;
-      if (loadedStage) {
-        stageScale = loadedStage.asset.scale;
-        stageCameraSource = loadedStage.asset;
-        stageSections = loadedStage.asset.sections.filter(isStageSection);
-        if (!stageSections.length) assetWarnings.push(`no visible stage sections for ${manifest.stageName}`);
-      } else {
-        stageCameraSource = null;
-      }
+      const stageScale = loadedStage?.asset.scale ?? 1;
+      if (loadedStage) stageCameraSource = loadedStage.asset;
+      else stageCameraSource = null;
       source = {
-        stageSections, stageScale, fighters, items: timeline.items, itemStart: 0, itemEnd: 0,
-        stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
+        stageSections: [], stageBackgrounds: [], stageScale, fighters, items: timeline.items, itemStart: 0, itemEnd: 0,
+        stageVariants: loadedVariants.flatMap(variant => variant ? [{
+          type: variant.type,
+          sections: variant.asset.sections.filter(section => section.vertexCount > 0),
+        }] : []),
+        stageState: {
+          fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1,
+          stadiumEvent: -1, stadiumType: -1, stadiumVisibleType: -1,
+        },
         effectModels: effectResult.bank,
       };
+      if (loadedStage) {
+        setupStageSections(source, loadedStage.asset.sections, loadedStageAnims?.asset ?? null, manifest.stageId);
+        if (!source.stageSections.length && !source.stageBackgrounds?.length && !source.stageAnimated?.length)
+          assetWarnings.push(`no visible stage sections for ${manifest.stageName}`);
+      } else {
+        mapAnimEntries = [];
+      }
       setupFodPlatforms(source, loadedStage?.asset.sections ?? []);
       renderer.setScene(source);
       buildHud();

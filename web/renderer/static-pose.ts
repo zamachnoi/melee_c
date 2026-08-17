@@ -82,19 +82,88 @@ export function isAcceptedFdSection(model: ModelAsset): boolean {
   return bounds[0] >= -100 && bounds[3] <= 100 && bounds[4] <= 5 && bounds[4] - bounds[1] >= 1;
 }
 
+export type StageSectionLayer = 'skip' | 'background' | 'playable';
+
+interface MapRole {
+  layer: StageSectionLayer;
+  anim: boolean;
+}
+
+const SKIP: MapRole = { layer: 'skip', anim: false };
+const BG_ANIM: MapRole = { layer: 'background', anim: true };
+const STAGE: MapRole = { layer: 'playable', anim: false };
+const STAGE_ANIM: MapRole = { layer: 'playable', anim: true };
+
+/** Per-map_id roles from each legal stage's OnInit / StageCallbacks.
+    Index is map_head model-group index (Ground_GetStageGObj id). */
+const STAGE_MAPS: Record<number, readonly MapRole[]> = {
+  /* Fountain of Dreams (grizumi.c): OnInit 0, 1, 3; gobj 3 then spawns 2 and 4.
+     2/3 platform heights come from replay events, not AnimJoint. */
+  2: [BG_ANIM, BG_ANIM, STAGE, STAGE, STAGE],
+  /* Pokemon Stadium (grpstadium.c): OnInit 0, PsType_Display=1, 2. */
+  3: [SKIP, BG_ANIM, STAGE_ANIM],
+  /* Yoshi's Story (grstory.c): OnInit 0, 1, 3, 2.  1 = skybox, 2 = Randall. */
+  8: [SKIP, BG_ANIM, STAGE_ANIM, STAGE],
+  /* Dream Land 64 (groldpupupu.c): OnInit 0, 3, 7, 5, 4, 6, 1, 8.  2 = hidden Whispy. */
+  28: [BG_ANIM, BG_ANIM, SKIP, BG_ANIM, STAGE_ANIM, STAGE_ANIM, BG_ANIM, STAGE_ANIM, STAGE],
+  /* Battlefield (grbattle.c): OnInit 0, 3, 1, 6.  Gobj 3 starts JOBJ_HIDDEN. */
+  31: [BG_ANIM, BG_ANIM, SKIP, SKIP, SKIP, SKIP, STAGE_ANIM],
+  /* Final Destination (grlast.c): OnInit 0, 1, 2, 3; 4–9 are space skybox layers. */
+  32: [SKIP, STAGE_ANIM, STAGE_ANIM, STAGE, BG_ANIM, BG_ANIM, BG_ANIM, BG_ANIM, BG_ANIM, BG_ANIM],
+};
+
+function heuristicLayer(model: ModelAsset): StageSectionLayer {
+  if (isStageSection(model)) return 'playable';
+  if (isBackgroundSection(model)) return 'background';
+  return 'skip';
+}
+
+function mapRole(stageId: number, mapId: number): MapRole | null {
+  const table = STAGE_MAPS[stageId];
+  if (!table) return null;
+  return table[mapId] ?? SKIP;
+}
+
+/** Which draw list a map_head section belongs to.  Known stages use decomp
+    spawn tables; anything else falls back to the size heuristic. */
+export function classifyStageSection(stageId: number, mapId: number, model: ModelAsset): StageSectionLayer {
+  if (!model.vertexCount) return 'skip';
+  const role = mapRole(stageId, mapId);
+  return role ? role.layer : heuristicLayer(model);
+}
+
+/** True when the stage callback attaches AnimJoint clip 0 (`grAnime_801C8138`). */
+export function stageMapAnimates(stageId: number, mapId: number): boolean {
+  return mapRole(stageId, mapId)?.anim === true;
+}
+
 /** A stage section that belongs to the playable arena rather than the skybox.
-    Keeps platform/structure sections (Battlefield sec 6, FoD platforms,
-    Yoshi's Story's main island) and drops huge background domes. */
+    Size heuristic used only for stages without a decomp map_id table. */
 export function isStageSection(model: ModelAsset): boolean {
   if (!model.vertexCount) return false;
   const bounds = positionBounds(transformBindPose(model));
   const width = bounds[3] - bounds[0];
   const height = bounds[4] - bounds[1];
   const depth = bounds[5] - bounds[2];
-  if (height < 1) return false;
-  if (width > 2000 || depth > 2000 || height > 2000) return false;
   const shortest = Math.min(width, height, depth);
   const longest = Math.max(width, height, depth);
+  if (height < 1) return false;
+  if (width > 2000 || depth > 2000 || height > 2000) return false;
+  if (shortest < 1 && longest > 400) return false;
   if (shortest > 0 && longest / shortest < 2 && width > 400) return false;
+  return true;
+}
+
+/** Skybox / audience / painted-backdrop geometry that should render behind the
+    playable arena.  Size heuristic used only for stages without a decomp table. */
+export function isBackgroundSection(model: ModelAsset): boolean {
+  if (!model.vertexCount || isStageSection(model)) return false;
+  const bounds = positionBounds(transformBindPose(model));
+  const width = bounds[3] - bounds[0];
+  const height = bounds[4] - bounds[1];
+  const depth = bounds[5] - bounds[2];
+  const shortest = Math.min(width, height, depth);
+  const longest = Math.max(width, height, depth);
+  if (shortest < 1 && longest < 400) return false;
   return true;
 }

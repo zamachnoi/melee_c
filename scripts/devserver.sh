@@ -98,6 +98,17 @@ export PORT="$free_port"
 # SLP_DIR defaults to ./replays; keep it in the worktree root
 export SLP_DIR="${SLP_DIR:-$root/replays}"
 export WEB_DIR="${WEB_DIR:-$root/web}"
+export ASSET_DIR="${ASSET_DIR:-$root/cache}"
+
+# Share fixture .slp files and the extracted DAT cache via the worktree's
+# fixtures symlink. Do not copy.
+if [ ! -e "$SLP_DIR" ]; then
+    ln -s fixtures "$SLP_DIR"
+fi
+if [ ! -e "$root/cache" ]; then
+    mkdir -p "$root/fixtures/cache"
+    ln -s fixtures/cache "$root/cache"
+fi
 
 # run in background, tracking PID so the next call can reclaim the port
 "$root/bin/viewer" &

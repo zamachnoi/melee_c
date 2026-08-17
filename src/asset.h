@@ -2,8 +2,9 @@
  * asset.h - runtime asset types + on-disk cache format shared by
  * tools/extract (writer) and src/viewer.c / src/asset.c (reader).
  *
- * The cache is a set of binary files under $ASSET_DIR (default ./cache),
- * versioned + ISO-fingerprinted via meta.json. See docs/DAT.md, docs/HSD.md,
+ * The cache is a set of binary files under $ASSET_DIR (default ./cache,
+ * shared across worktrees as fixtures/cache), versioned + ISO-fingerprinted
+ * via meta.json. See docs/DAT.md, docs/HSD.md,
  * docs/ANIM.md, docs/STAGES.md for the source formats this decodes.
  */
 

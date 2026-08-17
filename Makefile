@@ -77,7 +77,7 @@ test-http: web-build
 	@. ./dev-server.env && DEV_URL="$$DEV_URL" node tests/http.integration.mjs
 
 cache: $(BIN)/extract_tool
-	@rm -rf cache && mkdir -p cache
+	@if [ ! -e cache ]; then mkdir -p fixtures/cache && ln -s fixtures/cache cache; fi
 	$(BIN)/extract_tool --iso=fixtures/game.iso --all --out=cache
 
 test_asset: cache $(BIN)/test_asset

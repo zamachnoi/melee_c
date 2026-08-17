@@ -12,7 +12,19 @@ import {
   SHINE_COLOR, SHINE_RADIUS, xyExtent, xyRadius, type EffectModelBank, type GeneratedMesh,
 } from './effects.js';
 import type { Renderer, RenderSize, SceneSnapshot } from './interface.js';
+import { skinPositions } from '../animation/pose.js';
 import { positionBounds, transformBindPose } from './static-pose.js';
+
+const MOBJ_XLU = 1 << 30;
+
+function materialPass(
+  group: ModelAsset['primitiveGroups'][number],
+  phong: ModelAsset['phongs'][number] | null,
+): 'opaque' | 'xlu' {
+  if (group.materialFlags & MOBJ_XLU) return 'xlu';
+  if (phong && (phong.alpha < 0.999 || phong.diffuse[3] < 255)) return 'xlu';
+  return 'opaque';
+}
 
 const MESH_VERTEX_SHADER = `#version 300 es
 layout(location=0) in vec3 a_position;
@@ -269,21 +281,30 @@ export interface DynamicStageState {
   whispyDirection: number;
   stadiumEvent: number;
   stadiumType: number;
+  stadiumVisibleType: number;
+}
+
+export interface StageVariant {
+  type: number;
+  sections: readonly ModelAsset[];
 }
 
 export interface WebGLSceneSource {
   stageSections: readonly ModelAsset[];
+  stageBackgrounds?: readonly ModelAsset[];
+  stageVariants?: readonly StageVariant[];
   stageScale: number;
   fighters: readonly AnimatedFighter[];
   items: readonly TimelineItem[];
   itemStart: number;
   itemEnd: number;
   stageState: DynamicStageState;
-  /** Skinned stage sections (e.g. FoD's moving platforms) driven per frame. */
+  /** Skinned stage sections (FoD platforms, Randall, looping skyboxes). */
   stageAnimated?: readonly {
     model: ModelAsset;
     boneRows: Float32Array;
     poseVersion: number;
+    layer?: 'background' | 'playable';
   }[];
   effectModels?: EffectModelBank;
 }
@@ -394,6 +415,8 @@ interface GpuMesh {
   buffers: WebGLBuffer[];
   textures: WebGLTexture[];
   boneTexture: WebGLTexture | null;
+  positionBuffer: WebGLBuffer;
+  skinnedPositions: Float32Array | null;
   uploadedPoseVersion: number;
   model: ModelAsset;
   minDepth: number;
@@ -440,11 +463,14 @@ function uniform(gl: WebGL2RenderingContext, program: WebGLProgram, name: string
   return location;
 }
 
-function createBuffer(gl: WebGL2RenderingContext, target: number, data: ArrayBufferView<ArrayBufferLike>): WebGLBuffer {
+function createBuffer(
+  gl: WebGL2RenderingContext, target: number, data: ArrayBufferView<ArrayBufferLike>,
+  usage: number = gl.STATIC_DRAW,
+): WebGLBuffer {
   const buffer = gl.createBuffer();
   if (!buffer) throw new Error('WebGL2 could not allocate a buffer');
   gl.bindBuffer(target, buffer);
-  gl.bufferData(target, data as unknown as BufferSource, gl.STATIC_DRAW);
+  gl.bufferData(target, data as unknown as BufferSource, usage);
   return buffer;
 }
 
@@ -467,12 +493,18 @@ export class WebGL2Renderer implements Renderer {
   private overlayPointVertices = 0;
   private overlayTruncatedValue = false;
   private stageMeshes: GpuMesh[] = [];
+  private stageBackgroundMeshes: GpuMesh[] = [];
+  private stageVariantMeshes: { type: number; meshes: GpuMesh[] }[] = [];
   private stageAnimatedMeshes: GpuMesh[] = [];
   private fighterMeshes: GpuMesh[] = [];
   private extractedMeshes = new Map<string, GpuMesh>();
   private source: WebGLSceneSource = {
-    stageSections: [], stageScale: 1, fighters: [], items: [], itemStart: 0, itemEnd: 0,
-    stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
+    stageSections: [], stageBackgrounds: [], stageVariants: [], stageScale: 1,
+    fighters: [], items: [], itemStart: 0, itemEnd: 0,
+    stageState: {
+      fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1,
+      stadiumEvent: -1, stadiumType: -1, stadiumVisibleType: -1,
+    },
   };
   private size: RenderSize = { width: 960, height: 720, devicePixelRatio: 1 };
   private readonly lastCamera: CameraState = createCameraState();
@@ -629,8 +661,14 @@ export class WebGL2Renderer implements Renderer {
     this.destroyMeshes();
     try {
       this.stageMeshes = source.stageSections.map(model => this.uploadMesh(model, false));
+      this.stageBackgroundMeshes = (source.stageBackgrounds ?? []).map(
+        model => this.uploadMesh(model, false, 'linear'));
+      this.stageVariantMeshes = (source.stageVariants ?? []).map(variant => ({
+        type: variant.type,
+        meshes: variant.sections.map(model => this.uploadMesh(model, false)),
+      }));
       this.stageAnimatedMeshes = (source.stageAnimated ?? []).map(
-        entry => this.uploadMesh(entry.model, true));
+        entry => this.uploadMesh(entry.model, false, 'nearest', true));
       this.fighterMeshes = source.fighters.map(fighter => this.uploadMesh(fighter.model, true));
       const bank = source.effectModels;
       if (bank) {
@@ -664,28 +702,45 @@ export class WebGL2Renderer implements Renderer {
     gl.useProgram(this.programs.backdrop);
     gl.bindVertexArray(null);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    this.drawStars();
+    const hasBackground = this.stageBackgroundMeshes.length > 0
+      || this.animatedLayerCount('background') > 0;
+    if (!hasBackground) this.drawStars();
 
     gl.enable(gl.DEPTH_TEST);
-    gl.depthFunc(gl.LESS);
+    gl.depthFunc(gl.LEQUAL);
     gl.depthMask(true);
-    gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.clear(gl.DEPTH_BUFFER_BIT);
-    for (const mesh of this.stageMeshes) {
-      this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
-    }
-    const animatedStages = this.source.stageAnimated;
-    for (let index = 0; index < this.stageAnimatedMeshes.length; index++) {
-      const mesh = this.stageAnimatedMeshes[index];
-      const entry = animatedStages?.[index];
-      if (!entry) continue;
-      if (mesh.uploadedPoseVersion !== entry.poseVersion) {
-        this.uploadBoneRows(mesh, entry.boneRows);
-        mesh.uploadedPoseVersion = entry.poseVersion;
+    const variant = this.stageVariantMeshes.find(
+      entry => entry.type === this.source.stageState.stadiumVisibleType);
+    if (hasBackground) {
+      gl.disable(gl.CULL_FACE);
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+      for (const mesh of this.stageBackgroundMeshes) {
+        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, { materialPass: 'opaque' });
       }
-      this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, { skinnedStage: true });
+      this.drawAnimatedLayer(camera, 'background', 'opaque');
+      gl.enable(gl.BLEND);
+      gl.depthMask(false);
+      for (const mesh of this.stageBackgroundMeshes) {
+        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, { materialPass: 'xlu' });
+      }
+      this.drawAnimatedLayer(camera, 'background', 'xlu');
+      gl.depthMask(true);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
     }
+    gl.enable(gl.BLEND);
+    if (variant) {
+      for (const mesh of variant.meshes) {
+        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
+      }
+    } else {
+      for (const mesh of this.stageMeshes) {
+        this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
+      }
+    }
+    this.drawAnimatedLayer(camera, 'playable');
     for (let index = 0; index < this.fighterMeshes.length; index++) {
       const mesh = this.fighterMeshes[index];
       const fighter = this.source.fighters[index];
@@ -703,6 +758,9 @@ export class WebGL2Renderer implements Renderer {
 
   get gpuBytes(): number {
     return this.stageMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
+      + this.stageBackgroundMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
+      + this.stageVariantMeshes.reduce(
+        (sum, variant) => sum + variant.meshes.reduce((inner, mesh) => inner + mesh.gpuBytes, 0), 0)
       + this.stageAnimatedMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
       + this.fighterMeshes.reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
       + [...this.extractedMeshes.values()].reduce((sum, mesh) => sum + mesh.gpuBytes, 0)
@@ -740,7 +798,10 @@ export class WebGL2Renderer implements Renderer {
     return texture;
   }
 
-  private uploadMesh(model: ModelAsset, profile: boolean, filter: 'nearest' | 'linear' = 'nearest'): GpuMesh {
+  private uploadMesh(
+    model: ModelAsset, profile: boolean, filter: 'nearest' | 'linear' = 'nearest',
+    dynamicPositions = false,
+  ): GpuMesh {
     const gl = this.gl;
     const positions = transformBindPose(model);
     const bounds = positionBounds(positions);
@@ -750,7 +811,11 @@ export class WebGL2Renderer implements Renderer {
     const textures: WebGLTexture[] = [];
     try {
       gl.bindVertexArray(vao);
-      buffers.push(createBuffer(gl, gl.ARRAY_BUFFER, profile ? model.positions : positions));
+      const positionData = profile ? model.positions : positions;
+      buffers.push(createBuffer(
+        gl, gl.ARRAY_BUFFER, positionData,
+        dynamicPositions ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW,
+      ));
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
       buffers.push(createBuffer(gl, gl.ARRAY_BUFFER, model.uvs));
@@ -774,7 +839,10 @@ export class WebGL2Renderer implements Renderer {
       const textureBytes = model.textures.reduce((sum, texture) => sum + texture.rgba.byteLength, 0);
       const boneTexture = profile ? this.createBoneTexture(model.boneCount) : null;
       return {
-        vao, buffers, textures, boneTexture, uploadedPoseVersion: -1, model,
+        vao, buffers, textures, boneTexture,
+        positionBuffer: buffers[0],
+        skinnedPositions: dynamicPositions ? new Float32Array(model.positions.length) : null,
+        uploadedPoseVersion: -1, model,
         minDepth: profile ? Math.min(-100, bounds[0]) : bounds[2],
         maxDepth: profile ? Math.max(100, bounds[3]) : bounds[5],
         xyRadius: xyRadius(positions),
@@ -791,10 +859,36 @@ export class WebGL2Renderer implements Renderer {
     }
   }
 
+  private animatedLayerCount(layer: 'background' | 'playable'): number {
+    const animated = this.source.stageAnimated;
+    if (!animated) return 0;
+    let count = 0;
+    for (const entry of animated) if ((entry.layer ?? 'playable') === layer) count++;
+    return count;
+  }
+
+  private drawAnimatedLayer(
+    camera: CameraState, layer: 'background' | 'playable', materialPass?: 'opaque' | 'xlu',
+  ): void {
+    const animated = this.source.stageAnimated;
+    for (let index = 0; index < this.stageAnimatedMeshes.length; index++) {
+      const mesh = this.stageAnimatedMeshes[index];
+      const entry = animated?.[index];
+      if (!entry || (entry.layer ?? 'playable') !== layer) continue;
+      if (mesh.uploadedPoseVersion !== entry.poseVersion) {
+        this.uploadSkinnedStagePositions(mesh, entry.boneRows);
+        mesh.uploadedPoseVersion = entry.poseVersion;
+      }
+      this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale, {
+        materialPass,
+      });
+    }
+  }
+
   private drawMesh(
     mesh: GpuMesh, camera: CameraState, profile: boolean,
     rootX: number, rootY: number, facing: number, modelScale: number,
-    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; skinnedStage?: boolean },
+    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; skinnedStage?: boolean; materialPass?: 'opaque' | 'xlu' },
   ): void {
     if (!this.programs || !this.whiteTexture) return;
     const gl = this.gl;
@@ -822,6 +916,7 @@ export class WebGL2Renderer implements Renderer {
     for (let index = 0; index < mesh.model.primitiveGroups.length; index++) {
       const group = mesh.model.primitiveGroups[index];
       const phong = index < mesh.model.phongs.length ? mesh.model.phongs[index] : null;
+      if (extra?.materialPass && extra.materialPass !== materialPass(group, phong)) continue;
       if (extra?.tint) {
         gl.uniform4f(u.tint, extra.tint[0], extra.tint[1], extra.tint[2], extra.tint[3]);
       } else if (phong) {
@@ -854,6 +949,15 @@ export class WebGL2Renderer implements Renderer {
       gl.TEXTURE_2D, 0, this.capabilities.boneInternalFormat, 6, boneCount, 0, gl.RGBA, gl.FLOAT, null,
     );
     return texture;
+  }
+
+  private uploadSkinnedStagePositions(mesh: GpuMesh, boneRows: Float32Array): void {
+    if (!mesh.skinnedPositions) return;
+    if (boneRows.length !== mesh.model.boneCount * 24) return;
+    skinPositions(mesh.model, boneRows, mesh.skinnedPositions);
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.positionBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.skinnedPositions as unknown as BufferSource);
   }
 
   private uploadBoneRows(mesh: GpuMesh, boneRows: Float32Array): void {
@@ -1211,10 +1315,16 @@ export class WebGL2Renderer implements Renderer {
 
   private destroyMeshes(): void {
     for (const mesh of this.stageMeshes) this.deleteMesh(mesh);
+    for (const mesh of this.stageBackgroundMeshes) this.deleteMesh(mesh);
+    for (const variant of this.stageVariantMeshes) {
+      for (const mesh of variant.meshes) this.deleteMesh(mesh);
+    }
     for (const mesh of this.stageAnimatedMeshes) this.deleteMesh(mesh);
     for (const mesh of this.fighterMeshes) this.deleteMesh(mesh);
     for (const mesh of this.extractedMeshes.values()) this.deleteMesh(mesh);
     this.stageMeshes = [];
+    this.stageBackgroundMeshes = [];
+    this.stageVariantMeshes = [];
     this.stageAnimatedMeshes = [];
     this.fighterMeshes = [];
     this.extractedMeshes.clear();
@@ -1251,6 +1361,9 @@ export class WebGL2Renderer implements Renderer {
 
   private abandonGpuResources(): void {
     this.stageMeshes = [];
+    this.stageBackgroundMeshes = [];
+    this.stageVariantMeshes = [];
+    this.stageAnimatedMeshes = [];
     this.fighterMeshes = [];
     this.extractedMeshes.clear();
     this.starVao = null;

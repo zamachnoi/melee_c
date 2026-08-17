@@ -20,9 +20,10 @@
  *   GET /api/frame?n=<frame>  binary: [4B BE json_len][json][deflated RGBA]
  *
  * Environment:
- *   PORT   HTTP port (default 8080)
- *   SLP_DIR directory to scan for .slp files (default ./replays)
- *   HOST   bind address (default 0.0.0.0)
+ *   PORT      HTTP port (default 8080)
+ *   SLP_DIR   directory to scan for .slp files (default ./replays)
+ *   ASSET_DIR extracted DAT cache (default ./cache, shared via fixtures/cache)
+ *   HOST      bind address (default 0.0.0.0)
  */
 
 #include <arpa/inet.h>
@@ -1589,15 +1590,31 @@ static void handle_replay_manifest(int cfd, const char *req, const char *id) {
     const char *stage_slug = stage_asset_slug(replay.game_start.stage_id);
     if (stage_slug)
         o += (size_t)snprintf(json + o, sizeof json - o,
-                             "%s{\"stage\":\"/assets/v4/stages/%s.stage\"}",
-                             first ? "" : ",", stage_slug);
+                             "%s{\"stage\":\"/assets/v4/stages/%s.stage\","
+                             "\"animations\":\"/assets/v4/anims/%s.anims?s=1\"}",
+                             first ? "" : ",", stage_slug, stage_slug);
+    if (replay.game_start.stage_id == 3) {
+        static const struct { const char *slug; int type; } variants[] = {
+            { "grps1", 3 }, { "grps2", 4 }, { "grps4", 6 }, { "grps3", 9 },
+        };
+        for (size_t i = 0; i < sizeof variants / sizeof variants[0]; i++) {
+            char stage_path[512];
+            snprintf(stage_path, sizeof stage_path, "%s/%s.stage",
+                     asset_dir(), variants[i].slug);
+            if (access(stage_path, R_OK) != 0) continue;
+            o += (size_t)snprintf(json + o, sizeof json - o,
+                "%s{\"stage\":\"/assets/v4/stages/%s.stage\",\"stadiumType\":%d}",
+                o && json[o - 1] != '[' ? "," : "",
+                variants[i].slug, variants[i].type);
+        }
+    }
     o += (size_t)snprintf(json + o, sizeof json - o, "]}");
     slp_replay_free(&replay);
     if (o >= sizeof json) {
         send_error(cfd, 500, "Internal Server Error", "manifest overflow");
         return;
     }
-    char etag[96]; snprintf(etag, sizeof etag, "\"%s:manifest-1\"", id);
+    char etag[96]; snprintf(etag, sizeof etag, "\"%s:manifest-4\"", id);
     send_immutable(cfd, req, "application/json", etag, json, o);
 }
 
@@ -2123,6 +2140,34 @@ static void *conn_thread(void *arg) {
     return NULL;
 }
 
+/* Fresh worktrees have no replays/ dir (gitignored).  Point it at the shared
+   fixtures symlink instead of copying .slp files into the worktree. */
+static void ensure_replay_dir(void) {
+    struct stat st;
+    if (lstat(g_dir, &st) == 0) return;
+    const char *fixtures = getenv("FIXTURES_DIR");
+    if (!fixtures || !fixtures[0]) fixtures = "fixtures";
+    if (symlink(fixtures, g_dir) != 0)
+        mkdir(g_dir, 0755);
+}
+
+/* Same idea for the extracted DAT cache: default ./cache is gitignored, so
+   new worktrees share fixtures/cache rather than extracting a private copy.
+   Absolute ASSET_DIR (Docker, explicit env) is left alone. */
+static void ensure_asset_dir(void) {
+    const char *dir = asset_dir();
+    struct stat st;
+    if (lstat(dir, &st) == 0) return;
+    if (strcmp(dir, "cache") != 0 && strcmp(dir, "./cache") != 0) return;
+    const char *fixtures = getenv("FIXTURES_DIR");
+    if (!fixtures || !fixtures[0]) fixtures = "fixtures";
+    char target[1024];
+    snprintf(target, sizeof target, "%s/cache", fixtures);
+    mkdir(target, 0755);
+    if (symlink(target, dir) != 0)
+        mkdir(dir, 0755);
+}
+
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
@@ -2132,7 +2177,8 @@ int main(int argc, char **argv) {
         const char *d = getenv("SLP_DIR");
         snprintf(g_dir, sizeof g_dir, "%s", d ? d : "./replays");
     }
-    mkdir(g_dir, 0755);
+    ensure_replay_dir();
+    ensure_asset_dir();
 
     const char *wd = getenv("WEB_DIR");
     if (wd) snprintf(g_web_dir, sizeof g_web_dir, "%s", wd);
@@ -2175,8 +2221,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("SLP debug viewer serving http://%s:%ld  (replays dir: %s)\n",
-           host, p, g_dir);
+    printf("SLP debug viewer serving http://%s:%ld  (replays dir: %s, assets: %s)\n",
+           host, p, g_dir, asset_dir());
     if (g_active.replay.frame_count > 0)
         printf("active replay: %s  frames=%d..%d\n", g_active.name,
                g_active.start_frame, g_active.last_frame);

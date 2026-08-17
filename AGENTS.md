@@ -20,8 +20,11 @@ next free port starting at 8080, serves on `0.0.0.0`, and rewrites
 `dev-server.env`. The local URL remains suitable for agent checks, while the
 same port is reachable through the machine hostname (for example,
 `http://spire:8080`). The viewer serves the web UI from `web/` and reads
-replays from `replays/` (SLP_DIR); see `src/viewer.c` for env vars (`PORT`,
-`HOST`, `WEB_DIR`, `SLP_DIR`).
+replays from `replays/` (SLP_DIR) and extracted DAT assets from `cache/`
+(ASSET_DIR). Missing `replays/` and `cache/` dirs are symlinked to the shared
+`fixtures` tree (`fixtures` and `fixtures/cache`) so worktrees do not copy
+`.slp` files or re-extract the ISO. See `src/viewer.c` for env vars (`PORT`,
+`HOST`, `WEB_DIR`, `SLP_DIR`, `ASSET_DIR`).
 
 Stop this worktree's server with:
 
@@ -44,3 +47,6 @@ inside the new worktree.
 - Never hardcode 8081; always read `dev-server.env` in the current root.
 - `dev-server.env` and `.devserver.*` are gitignored on purpose.
 - Multiple worktrees can run simultaneously on different ports.
+- `replays/` and `cache/` are gitignored; they should symlink at `fixtures`
+  and `fixtures/cache` (shared on the machine). Do not copy the ISO cache
+  into a worktree.

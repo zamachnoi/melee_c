@@ -145,7 +145,7 @@ export function cameraViewProjection(camera: CameraState, viewport: CameraViewpo
   VIEW_SCRATCH[15] = 1;
   const aspect = viewport.width / Math.max(1, viewport.height);
   const near = Math.max(0.1, distance * 0.05);
-  const far = Math.max(distance + 800, 16384);
+  const far = Math.max(distance + 800, 131072);
   const f = 1 / Math.tan((fov * RADIANS) * 0.5);
   const nf = 1 / (near - far);
   PROJ_SCRATCH[0] = f / aspect; PROJ_SCRATCH[1] = 0; PROJ_SCRATCH[2] = 0; PROJ_SCRATCH[3] = 0;

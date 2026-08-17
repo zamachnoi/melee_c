@@ -281,8 +281,11 @@ function applyPackedRows(rows: Float32Array, offset: number, x: number, y: numbe
   out[2] = rows[offset + 8] * x + rows[offset + 9] * y + rows[offset + 10] * z + rows[offset + 11];
 }
 
-/** CPU oracle for tests only; production vertices are transformed by the shader. */
-export function skinPositions(model: ModelAsset, boneRows: Float32Array, output = new Float32Array(model.positions.length)): Float32Array {
+/** Skin model-local positions with packed bone rows (world or inverse-bind). */
+export function skinPositions(
+  model: ModelAsset, boneRows: Float32Array,
+  output: Float32Array<ArrayBufferLike> = new Float32Array(model.positions.length),
+): Float32Array {
   const point = new Float32Array(3);
   for (let vertex = 0; vertex < model.vertexCount; vertex++) {
     const po = vertex * 3, wo = vertex * 4;
@@ -339,6 +342,69 @@ function acquireStagePoseScratch(boneCount: number): StagePoseScratch {
     so applying the raw replay height would leave the platforms 25% too low. */
 export function stageBoneYOffset(worldY: number, stageScale: number): number {
   return stageScale === 0 ? worldY : worldY / stageScale;
+}
+
+/** Sample a map_head AnimJoint clip onto a stage section.  Unlike fighter
+    PoseEvaluator this does not pin bones 0/1 (those hacks are character-only). */
+export function evaluateStageAnim(
+  model: ModelAsset,
+  action: AnimationsAsset['actions'][number] | undefined,
+  frame: number,
+  output?: Float32Array,
+): Float32Array {
+  const rows = output ?? new Float32Array(model.boneCount * BONE_TEXTURE_FLOATS);
+  const scratch = acquireStagePoseScratch(model.boneCount);
+  const { local, world, skin, scale, rotation, translation, state } = scratch;
+  local.set(model.boneBase);
+  for (let bone = 0; bone < model.boneCount; bone++) decomposeBase(model, bone, scale, rotation, translation);
+  if (action?.joints.length) {
+    let t = frame < 0 ? 0 : frame;
+    if (action.loop && action.endFrame > 0) t -= Math.floor(t / action.endFrame) * action.endFrame;
+    for (let jointIndex = 0; jointIndex < action.joints.length; jointIndex++) {
+      const joint = action.joints[jointIndex];
+      const bone = joint.boneIndex;
+      if (bone >= model.boneCount) continue;
+      const base = bone * 3;
+      let sx = scale[base], sy = scale[base + 1], sz = scale[base + 2];
+      let rx = rotation[base], ry = rotation[base + 1], rz = rotation[base + 2];
+      let tx = translation[base], ty = translation[base + 1], tz = translation[base + 2];
+      for (let trackIndex = 0; trackIndex < joint.tracks.length; trackIndex++) {
+        const track = joint.tracks[trackIndex];
+        if (t < track.startFrame) continue;
+        const value = sampleTrack(track, t - track.startFrame);
+        switch (track.channel) {
+          case 1: rx = value; break; case 2: ry = value; break; case 3: rz = value; break;
+          case 5: case 11: tx = value; break; case 6: ty = value; break; case 7: tz = value; break;
+          case 8: sx = value; break; case 9: sy = value; break; case 10: sz = value; break;
+        }
+      }
+      matrixFromSrt(sx, sy, sz, rx, ry, rz, tx, ty, tz, local, bone * MATRIX_FLOATS);
+    }
+  }
+  state.fill(0);
+  const evaluateWorldBone = (bone: number): void => {
+    if (state[bone] === 2) return;
+    if (state[bone] === 1) return;
+    state[bone] = 1;
+    const parent = model.boneParents[bone];
+    const offset = bone * MATRIX_FLOATS;
+    if (parent === 0xffff) {
+      for (let index = 0; index < MATRIX_FLOATS; index++) world[offset + index] = local[offset + index];
+    } else {
+      evaluateWorldBone(parent);
+      multiplyAffine(world, parent * MATRIX_FLOATS, local, offset, world, offset);
+    }
+    state[bone] = 2;
+  };
+  for (let bone = 0; bone < model.boneCount; bone++) evaluateWorldBone(bone);
+  for (let bone = 0; bone < model.boneCount; bone++) {
+    const matrixOffset = bone * MATRIX_FLOATS;
+    const textureOffset = bone * BONE_TEXTURE_FLOATS;
+    packRows(world, matrixOffset, rows, textureOffset);
+    multiplyAffine(world, matrixOffset, model.boneInverseWorld, matrixOffset, skin, 0);
+    packRows(skin, 0, rows, textureOffset + MATRIX_FLOATS);
+  }
+  return rows;
 }
 
 /** Bind-pose bone rows for a stage section, with per-bone DAT-local Y offsets.

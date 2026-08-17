@@ -4,6 +4,13 @@ export const STAGE_EVENT_FOD = 1;
 export const STAGE_EVENT_WHISPY = 2;
 export const STAGE_EVENT_STADIUM = 3;
 
+const STADIUM_ON_FIELD_EVENTS = new Set([0, 5, 6]);
+
+/** The transformation that is on the field, ignoring jumbotron preview events. */
+export function stadiumFieldType(event: number, type: number, previous: number): number {
+  return STADIUM_ON_FIELD_EVENTS.has(event) ? type : previous;
+}
+
 function fillFrameRanges<T extends { frame: number }>(
   records: readonly T[], startFrame: number, frameCount: number,
   starts: Uint32Array, ends: Uint32Array, label: string,
@@ -34,6 +41,7 @@ export class ReplaySceneIndex {
   readonly whispyDirection: Int8Array;
   readonly stadiumEvent: Int16Array;
   readonly stadiumType: Int16Array;
+  readonly stadiumVisibleType: Int16Array;
 
   constructor(readonly timeline: Timeline) {
     const count = timeline.frameCount;
@@ -53,12 +61,14 @@ export class ReplaySceneIndex {
     this.whispyDirection = new Int8Array(count);
     this.stadiumEvent = new Int16Array(count);
     this.stadiumType = new Int16Array(count);
+    this.stadiumVisibleType = new Int16Array(count);
     this.whispyDirection.fill(-1);
     this.stadiumEvent.fill(-1);
     this.stadiumType.fill(-1);
+    this.stadiumVisibleType.fill(-1);
 
     let left = Number.NaN, right = Number.NaN;
-    let whispy = -1, stadiumEvent = -1, stadiumType = -1;
+    let whispy = -1, stadiumEvent = -1, stadiumType = -1, stadiumVisibleType = -1;
     for (let index = 0; index < count; index++) {
       for (let event = this.stageEventStarts[index]; event < this.stageEventEnds[index]; event++) {
         const value = timeline.stageEvents[event];
@@ -70,6 +80,7 @@ export class ReplaySceneIndex {
         else if (value.kind === STAGE_EVENT_STADIUM) {
           stadiumEvent = value.value0;
           stadiumType = value.value1;
+          stadiumVisibleType = stadiumFieldType(stadiumEvent, stadiumType, stadiumVisibleType);
         }
       }
       this.fodLeft[index] = left;
@@ -77,6 +88,7 @@ export class ReplaySceneIndex {
       this.whispyDirection[index] = whispy;
       this.stadiumEvent[index] = stadiumEvent;
       this.stadiumType[index] = stadiumType;
+      this.stadiumVisibleType[index] = stadiumVisibleType;
     }
   }
 }
