@@ -654,10 +654,25 @@ static void stadium_mark_empty(slp_stadium_transform_t *arr, size_t from,
 }
 
 /* Hold the last recorded height/direction so lookups work on frames where
-   the stage did not emit a new 0x3F/0x40/0x41 event. */
+   the stage did not emit a new 0x3F/0x40/0x41 event.  FoD 0x3F is sparse —
+   only on a height change — so seed the in-game spawn heights first; bind
+   pose is world y=0 and would sink the platforms into the fountain. */
 static void persist_stage_events(slp_replay_t *r) {
     slp_fod_platform_t fod_last[2] = {0};
     bool fod_have[2] = {false, false};
+    if (r->have_game_start && r->game_start.stage_id == SLP_FOD_STAGE_ID) {
+        fod_last[0] = (slp_fod_platform_t){
+            .frame_number = -SLP_FRAME_BASE,
+            .platform = 0,
+            .height = SLP_FOD_RIGHT_START,
+        };
+        fod_last[1] = (slp_fod_platform_t){
+            .frame_number = -SLP_FRAME_BASE,
+            .platform = 1,
+            .height = SLP_FOD_LEFT_START,
+        };
+        fod_have[0] = fod_have[1] = true;
+    }
     for (size_t i = 0; i < r->fod_count; i++) {
         unsigned platform = (unsigned)(i & 1);
         slp_fod_platform_t *e = &r->fod[i];

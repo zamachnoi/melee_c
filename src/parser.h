@@ -12,6 +12,9 @@ extern "C" {
 #define SLP_MAX_PORTS 4
 #define SLP_SLOT_COUNT 8      /* 4 ports * (leader + follower) */
 #define SLP_FRAME_BASE 123    /* frame -123 maps to index 0 */
+#define SLP_FOD_STAGE_ID 2
+#define SLP_FOD_RIGHT_START 22.125f /* platform 0 spawn height */
+#define SLP_FOD_LEFT_START 16.125f  /* platform 1 spawn height */
 
 typedef enum {
     SLP_OK = 0,

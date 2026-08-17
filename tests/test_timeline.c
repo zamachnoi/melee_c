@@ -108,7 +108,33 @@ int main(int argc, char **argv) {
                            ((uint32_t)hold_blob.data[45] << 16) |
                            ((uint32_t)hold_blob.data[46] << 8) |
                            (uint32_t)hold_blob.data[47];
-    assert(event_count == 1);
+    uint32_t events_off = ((uint32_t)hold_blob.data[40] << 24) |
+                          ((uint32_t)hold_blob.data[41] << 16) |
+                          ((uint32_t)hold_blob.data[42] << 8) |
+                          (uint32_t)hold_blob.data[43];
+    /* Spawn heights at the first serialized frame, then the real move. */
+    assert(event_count == 3);
+    const uint8_t *ev = hold_blob.data + events_off;
+    int32_t fn0 = (int32_t)(((uint32_t)ev[0] << 24) | ((uint32_t)ev[1] << 16) |
+                            ((uint32_t)ev[2] << 8) | ev[3]);
+    assert(fn0 == -1 && ev[4] == 1 && ev[5] == 0);
+    uint32_t bits = ((uint32_t)ev[8] << 24) | ((uint32_t)ev[9] << 16) |
+                    ((uint32_t)ev[10] << 8) | ev[11];
+    float height;
+    memcpy(&height, &bits, 4);
+    assert(height == SLP_FOD_RIGHT_START);
+    ev += 16;
+    fn0 = (int32_t)(((uint32_t)ev[0] << 24) | ((uint32_t)ev[1] << 16) |
+                    ((uint32_t)ev[2] << 8) | ev[3]);
+    assert(fn0 == -1 && ev[4] == 1 && ev[5] == 1);
+    bits = ((uint32_t)ev[8] << 24) | ((uint32_t)ev[9] << 16) |
+           ((uint32_t)ev[10] << 8) | ev[11];
+    memcpy(&height, &bits, 4);
+    assert(height == SLP_FOD_LEFT_START);
+    ev += 16;
+    fn0 = (int32_t)(((uint32_t)ev[0] << 24) | ((uint32_t)ev[1] << 16) |
+                    ((uint32_t)ev[2] << 8) | ev[3]);
+    assert(fn0 == 1 && ev[4] == 1 && ev[5] == 0);
     timeline_blob_free(&hold_blob);
     slp_replay_free(&hold);
     return 0;
