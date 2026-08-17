@@ -1,7 +1,7 @@
 import { parseAnimations, type AnimationsAsset } from './assets/anims.js';
 import { parseModel, type ModelAsset } from './assets/model.js';
 import { parseStage, type StageAsset } from './assets/stage.js';
-import { PoseEvaluator, evaluateStagePose, type PoseEvaluation } from './animation/pose.js';
+import { PoseEvaluator, evaluateStagePose, stageBoneYOffset, type PoseEvaluation } from './animation/pose.js';
 import { ReplayClock } from './replay/clock.js';
 import { ReplaySceneIndex } from './replay/scene.js';
 import { parseTimeline, type Timeline } from './replay/timeline.js';
@@ -338,48 +338,74 @@ export async function bootWebGL2(): Promise<void> {
 
   const renderCurrent = (): void => { renderer.draw(camera); };
 
-  /* Fountain of Dreams: the two moving platforms are bones 2/3 of stage
-     section 2.  The replay records their Y per frame (fodLeft/fodRight), so
-     we re-pose that section's bones and let the renderer skin it. */
-  const FOD_PLATFORM_LEFT_BONE = 2;
-  const FOD_PLATFORM_RIGHT_BONE = 3;
-  let fodStageEntry: { model: ModelAsset; boneRows: Float32Array; poseVersion: number } | null = null;
+  /* Fountain of Dreams: side platforms are section 2 bones 2/3 plus a second
+     material pass on section 3 bones 1/2.  Replay heights are world Y; the
+     mesh is DAT-local and drawn at stageScale 0.75.  Until the first 0x3F
+     event, use the in-game start heights (left 16.125, right 22.125). */
+  const FOD_LEFT_START = 16.125;
+  const FOD_RIGHT_START = 22.125;
+  const FOD_PLATFORM_SECTIONS = [
+    { index: 2, leftBone: 2, rightBone: 3 },
+    { index: 3, leftBone: 1, rightBone: 2 },
+  ] as const;
+  type FodStageEntry = {
+    model: ModelAsset; boneRows: Float32Array; poseVersion: number;
+    leftBone: number; rightBone: number;
+  };
+  let fodStageEntries: FodStageEntry[] = [];
   let lastFodLeft = Number.NaN;
   let lastFodRight = Number.NaN;
+
+  const fodWorldHeight = (value: number, fallback: number): number =>
+    Number.isFinite(value) ? value : fallback;
 
   const setupFodPlatforms = (
     sceneSource: WebGLSceneSource, sections: readonly ModelAsset[],
   ): void => {
-    fodStageEntry = null;
+    fodStageEntries = [];
     lastFodLeft = Number.NaN;
     lastFodRight = Number.NaN;
     if (!timeline || timeline.stageId !== 2) return;
-    const section = sections[2];
-    if (!section || !section.vertexCount) return;
-    /* The platform section is skinned per frame, so remove it from the static
-       list to avoid drawing it twice. */
+    const animated: FodStageEntry[] = [];
+    for (const spec of FOD_PLATFORM_SECTIONS) {
+      const section = sections[spec.index];
+      if (!section?.vertexCount) continue;
+      animated.push({
+        model: section, boneRows: new Float32Array(0), poseVersion: 0,
+        leftBone: spec.leftBone, rightBone: spec.rightBone,
+      });
+    }
+    if (!animated.length) return;
+    const skip = new Set(animated.map(entry => entry.model));
     sceneSource.stageSections = sceneSource.stageSections.filter(
-      candidate => candidate !== section);
-    const boneRows = evaluateStagePose(section, new Map());
-    fodStageEntry = { model: section, boneRows, poseVersion: 0 };
-    sceneSource.stageAnimated = [fodStageEntry];
+      candidate => !skip.has(candidate));
+    fodStageEntries = animated;
+    sceneSource.stageAnimated = fodStageEntries;
+    updateFodPlatforms(sceneSource, Number.NaN, Number.NaN);
   };
 
   const updateFodPlatforms = (
     sceneSource: WebGLSceneSource, fodLeft: number, fodRight: number,
   ): void => {
-    if (!fodStageEntry) return;
-    const changed = fodLeft !== lastFodLeft || fodRight !== lastFodRight;
-    lastFodLeft = fodLeft;
-    lastFodRight = fodRight;
-    if (!changed) return;
-    const offsets = new Map<number, number>();
-    /* The platform meshes sit at y=-1.5 in bind pose; the replay height is
-       their absolute Y. */
-    if (Number.isFinite(fodLeft)) offsets.set(FOD_PLATFORM_LEFT_BONE, fodLeft + 1.5);
-    if (Number.isFinite(fodRight)) offsets.set(FOD_PLATFORM_RIGHT_BONE, fodRight + 1.5);
-    evaluateStagePose(fodStageEntry.model, offsets, fodStageEntry.boneRows);
-    fodStageEntry.poseVersion += 1;
+    if (!fodStageEntries.length) return;
+    const left = fodWorldHeight(fodLeft, FOD_LEFT_START);
+    const right = fodWorldHeight(fodRight, FOD_RIGHT_START);
+    sceneSource.stageState.fodLeft = left;
+    sceneSource.stageState.fodRight = right;
+    const changed = left !== lastFodLeft || right !== lastFodRight;
+    lastFodLeft = left;
+    lastFodRight = right;
+    if (!changed && fodStageEntries.every(entry => entry.boneRows.length)) return;
+    const leftOffset = stageBoneYOffset(left, sceneSource.stageScale);
+    const rightOffset = stageBoneYOffset(right, sceneSource.stageScale);
+    for (const entry of fodStageEntries) {
+      const offsets = new Map<number, number>([
+        [entry.leftBone, leftOffset], [entry.rightBone, rightOffset],
+      ]);
+      entry.boneRows = evaluateStagePose(entry.model, offsets, entry.boneRows.length
+        ? entry.boneRows : undefined);
+      entry.poseVersion += 1;
+    }
   };
 
   const updateDebug = (index: number): void => {

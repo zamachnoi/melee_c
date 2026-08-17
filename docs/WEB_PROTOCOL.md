@@ -80,8 +80,8 @@ slot descriptors may share a compact zero backing range.
 Item records are 40 bytes: frame, spawn id, type, state, signed owner, facing,
 velocity x/y, position x/y, damage, and instance id. Stage-event records are 16
 bytes: frame, kind, index, reserved, `data0`, and `data1`. Kind 1 is FoD (index
-is platform and `data0` is float height), kind 2 is Whispy, and kind 3 is
-Stadium.
+0 = right platform, 1 = left; `data0` is world-space float height), kind 2 is
+Whispy, and kind 3 is Stadium.
 
 The camera section has a 16-byte header containing offsets for `x:f32[]`,
 `y:f32[]`, and `zoom:f32[]`. These required samples reproduce the C reference

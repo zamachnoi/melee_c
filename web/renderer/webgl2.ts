@@ -1078,9 +1078,9 @@ export class WebGL2Renderer implements Renderer {
     this.overlayTruncatedValue = false;
     const state = this.source.stageState;
     if (Number.isFinite(state.fodLeft))
-      this.pushOverlayLine(-58, state.fodLeft, -18, state.fodLeft, 0.35, 0.82, 1, 0.8);
+      this.pushOverlayLine(-49.5, state.fodLeft, -21, state.fodLeft, 0.35, 0.82, 1, 0.8);
     if (Number.isFinite(state.fodRight))
-      this.pushOverlayLine(18, state.fodRight, 58, state.fodRight, 0.35, 0.82, 1, 0.8);
+      this.pushOverlayLine(21, state.fodRight, 49.5, state.fodRight, 0.35, 0.82, 1, 0.8);
     if (state.whispyDirection >= 0) {
       const direction = state.whispyDirection === 1 ? 1 : -1;
       this.pushOverlayLine(-72, 8, -72 + direction * 12, 8, 0.55, 1, 0.68, 0.75);

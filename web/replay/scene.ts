@@ -63,8 +63,9 @@ export class ReplaySceneIndex {
       for (let event = this.stageEventStarts[index]; event < this.stageEventEnds[index]; event++) {
         const value = timeline.stageEvents[event];
         if (value.kind === STAGE_EVENT_FOD) {
-          if (value.index === 0) left = value.value0;
-          else if (value.index === 1) right = value.value0;
+          /* Slippi 0x3F: platform 0 = right, 1 = left. */
+          if (value.index === 0) right = value.value0;
+          else if (value.index === 1) left = value.value0;
         } else if (value.kind === STAGE_EVENT_WHISPY) whispy = value.value0;
         else if (value.kind === STAGE_EVENT_STADIUM) {
           stadiumEvent = value.value0;
