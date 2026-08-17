@@ -783,7 +783,6 @@ export async function bootWebGL2(): Promise<void> {
       title.textContent = `${player?.name || `P${slot.port + 1}`}${slot.follower ? ' · Nana' : ''}`;
       const character = document.createElement('span');
       character.className = 'hud-char';
-      meta.append(title, character);
       const percent = document.createElement('span');
       percent.className = 'hud-percent';
       percent.textContent = '0%';
@@ -795,13 +794,16 @@ export async function bootWebGL2(): Promise<void> {
         const pip = document.createElement('img');
         pip.className = 'hud-stock';
         pip.alt = '';
+        pip.width = 24;
+        pip.height = 24;
         pip.decoding = 'async';
         pip.addEventListener('error', () => pip.classList.add('missing'));
         pip.addEventListener('load', () => pip.classList.remove('missing'));
         return pip;
       });
       stocks.append(...stockPips);
-      root.append(meta, percent, stocks);
+      meta.append(title, character, stocks);
+      root.append(meta, percent);
       root.addEventListener('click', () => followFighter(runtime.slot));
       return {
         root, title, character, percent, stockPips, costume,
