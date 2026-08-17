@@ -1,10 +1,24 @@
 # WebGL2 replay renderer
 
-Phase 4 is available without changing the default software viewer:
+WebGL2 is the default completed-replay viewer. Live WebSocket spectating
+(Phase 5) is skipped; completed `.slp` files already contain the final
+timeline.
 
 ```text
-http://spire:8080/?renderer=webgl2
+http://spire:8080/
+/?replay={sha256}&slot=2&frame=8
 ```
+
+The C software renderer remains the migration oracle and is not the product
+path:
+
+```text
+/?renderer=software
+```
+
+`?renderer=webgl2` is still accepted as an explicit alias. Raster frame
+endpoints stay available for reference images until they have no remaining
+dependency.
 
 The page runs its WebGL2, shader, floating-point texture, texture-size, and
 vertex-capability gate before requesting a replay timeline or reusable model,
@@ -15,18 +29,17 @@ same-model instances, and followers such as Nana. The FD section uses the same
 visibility rules as the C renderer. Replay and follow-target selectors use real
 display names; `slot` and `frame` query parameters make a case reproducible.
 
-```text
-/?renderer=webgl2&replay={sha256}&slot=2&frame=8
-```
-
 Playback uses an integer 60 Hz replay clock. Space toggles play/pause, the arrow
 keys or buttons step by one frame, and the range input scrubs. Original, fit,
 and follow camera modes are available. Pointer drag and wheel switch to a free
 local camera, while double-click resets the selected automatic mode. None of
 these operations makes a network request.
 
-Items are indexed by frame and rendered as local laser or item proxies. Shields
-are translucent world-space discs. HTML HUD cards show names, percent, stocks,
+Items are indexed by frame. Fox/Falco lasers, illusion/phantasm, shields, shine,
+and firefox use DAT meshes from `extract --effects` when `effects.json` is in
+the asset directory; procedural bubbles/cylinders remain the fallback. Remaining
+items stay as local proxy discs. Shine and firefox still classify from figatree
+action names so the extracted mesh can be placed. HTML HUD cards show names, percent, stocks,
 and follower identity. The backtick key or Debug button shows raw/resolved
 animation identity, item count, fighter state, and persistent FoD, Whispy, and
 Stadium event state.
@@ -78,12 +91,22 @@ Measured on 2026-08-17 in Chromium:
   new requests and no GL error. Injected animation, model, and stage failures
   each produced visible warnings while the remaining replay stayed usable.
 
+## Phase 6 cutover
+
+- `/` serves the WebGL2 page. `/?renderer=software` serves the C raster viewer.
+- Replay upload lives on the default page via `POST /api/replays`.
+- `/api/frame`, `/api/frames`, and `/api/replays/{id}/reference` remain as the
+  visual oracle. They are not used during WebGL2 playback.
+
 ## Known visual discrepancies
 
-- Generic items and Ice Climber effects use colored proxy discs; only Fox/Falco
-  lasers reproduce the C line treatment. Item models and particles are not in
-  the schema-4 asset set.
-- Shields are flat translucent discs rather than Melee's full shield material.
+- Generic items use colored proxy discs. Fox/Falco lasers, illusion, phantasm,
+  shine, firefox, and shields draw extracted DAT meshes from `effects.json`
+  (`make cache` / `extract --effects`). Procedural geometry is the fallback
+  when a catalog entry or model file is missing.
+- Shields use gfx 11's in-game billboard: the I4 quadrant is mirrored into a
+  full circle and multiplied by the IA8 bubble lighting, then port-tinted and
+  scaled to remaining shield size.
 - FoD, Whispy, and Stadium records drive persistent proxy indicators. Moving
   stage geometry is not yet deformed because the supplied fixtures contain
   Final Destination and no dynamic-stage events.

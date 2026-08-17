@@ -5,7 +5,8 @@
  * as raw RGBA for the browser. No native windowing / SDL required.
  *
  * Endpoints:
- *   GET /                     HTML+JS frontend
+ *   GET /                     WebGL2 frontend (default)
+ *   GET /?renderer=software   C software-renderer frontend
  *   GET /api/replays          JSON list with immutable replay ids
  *   POST /api/replays         upload raw .slp, returns immutable replay id
  *   GET /api/replays/{id}/manifest replay-scoped metadata and asset URLs
@@ -1711,6 +1712,23 @@ static int safe_asset_name(const char *name) {
 static void handle_asset(int cfd, const char *req, const char *path) {
     static const char prefix[] = "/assets/v4/";
     const char *relative = path + sizeof(prefix) - 1;
+    if (strcmp(relative, "effects.json") == 0) {
+        char file_path[1400];
+        snprintf(file_path, sizeof file_path, "%s/effects.json", asset_dir());
+        size_t len = 0; char *body = read_whole_file(file_path, &len);
+        if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
+        if (len < 16 || body[0] != '{') {
+            free(body);
+            send_error(cfd, 422, "Unprocessable Content", "invalid effects catalog");
+            return;
+        }
+        uint8_t digest[32]; char hex[65], etag[72];
+        sha256_bytes(body, len, digest); sha256_hex(digest, hex);
+        snprintf(etag, sizeof etag, "\"%.64s\"", hex);
+        send_immutable(cfd, req, "application/json", etag, body, len);
+        free(body);
+        return;
+    }
     const char *name = NULL, *ctype = NULL, *suffix = NULL;
     if (strncmp(relative, "models/", 7) == 0) {
         name = relative + 7; suffix = ".model"; ctype = "application/vnd.melee.model";
@@ -1928,24 +1946,24 @@ static char *read_whole_file(const char *path, size_t *len) {
     return buf;
 }
 
-/* Serves the WebGL2 slice only behind ?renderer=webgl2. The software viewer
-   stays the default throughout the migration.
+/* Serves WebGL2 by default. The software viewer remains at ?renderer=software
+   as the migration oracle. ?renderer=webgl2 is still accepted as an alias.
    This lets you edit the frontend and just refresh -- no rebuild needed. */
 static void handle_root(int cfd, const char *query) {
     char path[1400];
     char renderer[32] = "";
     query_value(query, "renderer", renderer, sizeof renderer);
-    int webgl2 = strcmp(renderer, "webgl2") == 0;
+    int software = strcmp(renderer, "software") == 0;
     snprintf(path, sizeof path, "%s/%s", g_web_dir,
-             webgl2 ? "webgl.html" : "index.html");
+             software ? "index.html" : "webgl.html");
     size_t len = 0;
     char *body = read_whole_file(path, &len);
     if (body) {
         send_response(cfd, "text/html; charset=utf-8", body, len);
         free(body);
-    } else if (!webgl2) {
+    } else if (software) {
         send_response(cfd, "text/html; charset=utf-8", html_doc,
-                      strlen(html_doc));
+                       strlen(html_doc));
     } else {
         send_error(cfd, 500, "Internal Server Error",
                    "web/webgl.html is missing");

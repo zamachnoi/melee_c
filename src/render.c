@@ -195,11 +195,16 @@ static void eval_pose(const asset_model_t *m, const asset_anims_t *a,
             /* Bone 1 is the fighter's TransN joint.  Its Z channel is
                authored root motion (35 units for dash attack/get-up rolls,
                40 for tech rolls), but the replay position has already
-               applied that movement.  Keep the authored offset only for
-               Cliff actions: their replay position is the ledge anchor and
-               the TransN Y/Z tracks place the body below and beside it. */
-            if (ja->bone_index == 1 && !ledge_anchored)
+               applied that movement.  Cliff actions are the same: Slippi
+               x/y is already the hanging body, not the ledge grab point, so
+               keeping TransN Y/Z would hang the fighter under the stage. */
+            if (ja->bone_index == 1) {
                 trs[2] = m->bones[1].base[11];
+                if (ledge_anchored) {
+                    trs[0] = m->bones[1].base[9];
+                    trs[1] = m->bones[1].base[10];
+                }
+            }
             mtx_from_srt(scl, rot, trs, local[ja->bone_index]);
         }
     }

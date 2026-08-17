@@ -5,7 +5,10 @@
  * TOBJ), decodes fighter models + figatree animations + stages, and writes
  * the binary cache consumed by src/asset.c (see src/asset.h).
  *
- * Usage: extract --iso=game.iso --out=cache [--char=falco] [--stage=FD]
+ * `--effects` walks Ef*Data.dat tables, ItCo.dat articles, and each fighter's
+ * ftData item list, then writes schema-4 `.model` files plus `effects.json`.
+ *
+ * Usage: extract --iso=game.iso --out=cache [--char=falco] [--stage=FD] [--effects]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -294,14 +297,14 @@ static void decode_texture(uint32_t fmt,uint16_t w,uint16_t h,const uint8_t*data
             for(uint32_t y=0;y<h;y+=8)for(uint32_t x=0;x<w;x+=8)
             for(uint32_t y1=y;y1<y+8&&y1<h;y1++)for(uint32_t x1=x;x1<x+8;x1+=2){
                 uint8_t p=data[inp++];uint8_t i=(uint8_t)((p&0xF0)|(p>>4));
-                if(x1<w)tex_put(rgba,y1*w+x1,0xFF000000u|i|((uint32_t)i<<8)|((uint32_t)i<<16));
-                if(x1+1<w){uint8_t j=(uint8_t)((p&0x0F)<<4|(p&0x0F));tex_put(rgba,y1*w+x1+1,0xFF000000u|j|((uint32_t)j<<8)|((uint32_t)j<<16));}
+                if(x1<w)tex_put(rgba,y1*w+x1,((uint32_t)i<<24)|i|((uint32_t)i<<8)|((uint32_t)i<<16));
+                if(x1+1<w){uint8_t j=(uint8_t)((p&0x0F)<<4|(p&0x0F));tex_put(rgba,y1*w+x1+1,((uint32_t)j<<24)|j|((uint32_t)j<<8)|((uint32_t)j<<16));}
             }
             break;}
         case 1:{ /* I8 */
             for(uint32_t y=0;y<h;y+=4)for(uint32_t x=0;x<w;x+=8)
             for(uint32_t y1=y;y1<y+4&&y1<h;y1++)for(uint32_t x1=x;x1<x+8&&x1<w;x1++){
-                uint8_t p=data[inp++];tex_put(rgba,y1*w+x1,0xFF000000u|p|((uint32_t)p<<8)|((uint32_t)p<<16));
+                uint8_t p=data[inp++];tex_put(rgba,y1*w+x1,((uint32_t)p<<24)|p|((uint32_t)p<<8)|((uint32_t)p<<16));
             }
             break;}
         case 2:{ /* IA4 */
@@ -468,9 +471,10 @@ static void decode_pobj(const dat_t*d,const reloc_idx_t*ri,uint32_t pobj_rel,
     const uint8_t*pd=dat_at(d,pobj_rel);
     if(!pd)return;
     uint32_t attrs_rel=r32(pd+0x08);uint16_t dlsz=r16(pd+0x0E);uint32_t dl_rel=r32(pd+0x10);
-    if(!attrs_rel||!dl_rel)return;
+    if(!attrs_rel||!dl_rel||dlsz==0||dlsz>0x2000)return;
     attr_t attrs[16];int nattr=read_attrs(d,attrs_rel,attrs,16);if(nattr<=0)return;
     uint32_t dl_abs=dat_abs(d,dl_rel);size_t dl_len=(size_t)dlsz*32;
+    if(dl_abs < 0x20 || dl_abs >= d->len) return;
     if(dl_abs+dl_len>d->len)dl_len=d->len-dl_abs;
     const uint8_t*dl=d->bytes+dl_abs;
     envelope_t envelopes[256];
@@ -553,11 +557,19 @@ typedef struct{
     texmap_entry_t*texmap;size_t texmap_n,texmap_cap;
 }builder_t;
 
-static int16_t tex_resolve(builder_t*b,uint32_t tobj_rel){
+typedef struct {
+    asset_texture_t tex;
+    uint32_t image_rel;
+    uint32_t wrap_s, wrap_t;
+    uint8_t repeat_s, repeat_t;
+    float scale_x, scale_y, translate_x, translate_y;
+} tobj_img_t;
+
+static int tobj_decode(builder_t*b,uint32_t tobj_rel,tobj_img_t*out){
+    memset(out,0,sizeof*out);
     const uint8_t*td=dat_at(b->d,tobj_rel);if(!td)return -1;
     uint32_t image_rel=r32(td+0x4C),tlut_rel=r32(td+0x50);
     if(!image_rel)return -1;
-    for(size_t i=0;i<b->texmap_n;i++)if(b->texmap[i].rel==image_rel)return b->texmap[i].tex;
     const uint8_t*im=dat_at(b->d,image_rel);if(!im)return -1;
     uint32_t data_rel=r32(im);uint16_t w=r16(im+4),h=r16(im+6);uint32_t fmt=r32(im+8);
     uint32_t*pal=NULL;size_t paln=0;
@@ -568,7 +580,6 @@ static int16_t tex_resolve(builder_t*b,uint32_t tobj_rel){
             uint16_t ncols=r16(tl+0x0C);
             if(ldata&&ncols){
                 uint32_t lda=dat_abs(b->d,ldata);paln=ncols;pal=malloc(ncols*sizeof(uint32_t));
-                /* palette format from TLUT+4 */
                 for(uint16_t i=0;i<ncols&&lda+i*2+2<=b->d->len;i++){
                     uint16_t p=r16(b->d->bytes+lda+i*2);
                     if(pal_fmt==0)pal[i]=pal_entry_ia8(p);
@@ -581,20 +592,64 @@ static int16_t tex_resolve(builder_t*b,uint32_t tobj_rel){
     size_t ts=0;
     switch(fmt){case 0:case 8:case 14:ts=(size_t)((w+7)/8)*((h+7)/8)*32;break;case 1:case 2:case 9:ts=(size_t)((w+7)/8)*((h+3)/4)*32;break;case 3:case 4:case 5:case 10:ts=(size_t)((w+3)/4)*((h+3)/4)*32;break;case 6:ts=(size_t)((w+3)/4)*((h+3)/4)*64;break;default:ts=(size_t)w*h*4;}
     uint32_t da=dat_abs(b->d,data_rel);if(da+ts>b->d->len)ts=b->d->len-da;
+    if(w == 0 || h == 0 || w > 1024 || h > 1024) { free(pal); return -1; }
     asset_texture_t tex;memset(&tex,0,sizeof tex);tex.width=w;tex.height=h;tex.format=fmt;
     tex.rgba=malloc((size_t)w*h*4);
     decode_texture(fmt,w,h,b->d->bytes+da,pal,paln,tex.rgba);
     free(pal);
+    out->tex=tex;
+    out->image_rel=image_rel;
+    out->wrap_s=r32(td+0x34);
+    out->wrap_t=r32(td+0x38);
+    out->repeat_s=td[0x3C]?td[0x3C]:1;
+    out->repeat_t=td[0x3D]?td[0x3D]:1;
+    out->scale_x=rf32(td+0x1C);
+    out->scale_y=rf32(td+0x20);
+    out->translate_x=rf32(td+0x28);
+    out->translate_y=rf32(td+0x2C);
+    if(!(out->scale_x==out->scale_x) || fabsf(out->scale_x)<1e-6f) out->scale_x=1;
+    if(!(out->scale_y==out->scale_y) || fabsf(out->scale_y)<1e-6f) out->scale_y=1;
+    return 0;
+}
+
+static int16_t tex_register(builder_t*b,uint32_t image_rel,asset_texture_t tex){
+    if(image_rel){
+        for(size_t i=0;i<b->texmap_n;i++)if(b->texmap[i].rel==image_rel){
+            free(tex.rgba);
+            return b->texmap[i].tex;
+        }
+    }
     int16_t idx=(int16_t)b->m->texture_count;
     if(b->m->texture_count%16==0)b->m->textures=realloc(b->m->textures,(b->m->texture_count+16)*sizeof(asset_texture_t));
     b->m->textures[b->m->texture_count++]=tex;
-    if(b->texmap_n==b->texmap_cap){b->texmap_cap=b->texmap_cap?b->texmap_cap*2:32;b->texmap=realloc(b->texmap,b->texmap_cap*sizeof(*b->texmap));}
-    texmap_entry_t entry = { image_rel, idx };
-    b->texmap[b->texmap_n++] = entry;
+    if(image_rel){
+        if(b->texmap_n==b->texmap_cap){b->texmap_cap=b->texmap_cap?b->texmap_cap*2:32;b->texmap=realloc(b->texmap,b->texmap_cap*sizeof(*b->texmap));}
+        texmap_entry_t entry = { image_rel, idx };
+        b->texmap[b->texmap_n++] = entry;
+    }
     return idx;
 }
 
+static int16_t tex_resolve(builder_t*b,uint32_t tobj_rel){
+    tobj_img_t img;
+    if(tobj_decode(b,tobj_rel,&img))return -1;
+    return tex_register(b,img.image_rel,img.tex);
+}
+
+static int16_t tex_resolve_mobj(builder_t*b,uint32_t tobj_rel){
+    int16_t first=-1;
+    uint32_t t=tobj_rel;
+    while(t){
+        int16_t idx=tex_resolve(b,t);
+        if(first<0&&idx>=0)first=idx;
+        const uint8_t*td=dat_at(b->d,t);if(!td)break;
+        t=r32(td+4);
+    }
+    return first;
+}
+
 static void build_bones(builder_t*b,uint32_t root_rel,int32_t parent){
+    if(b->m->bone_count >= 512) return;
     const uint8_t*j=dat_at(b->d,root_rel);if(!j)return;
     uint32_t child_rel=r32(j+0x08),next_rel=r32(j+0x0C);
     float rot[3]={rf32(j+0x14),rf32(j+0x18),rf32(j+0x1C)};
@@ -640,7 +695,7 @@ static void build_geometry(builder_t*b,uint32_t root_rel){
                 if(md){
                     mfl=r32(md+0x04);
                     uint32_t tobj_rel=r32(md+0x08),mat_rel=r32(md+0x0C);
-                    if(tobj_rel)tex=tex_resolve(b,tobj_rel);
+                    if(tobj_rel)tex=tex_resolve_mobj(b,tobj_rel);
                     if(mat_rel){
                         const uint8_t*mat=dat_at(b->d,mat_rel);
                         if(mat){
@@ -1215,15 +1270,338 @@ static void extract_char(const fst_list_t*dats,const uint8_t*iso,
         }
     }
 }
+
+static void dat_code(const char *bn, char *out, size_t cap) {
+    const char *s = bn;
+    if (strncasecmp(s, "ef", 2) == 0 || strncasecmp(s, "it", 2) == 0) s += 2;
+    size_t o = 0;
+    for (; *s && o + 1 < cap; s++) {
+        if (strncasecmp(s, "data", 4) == 0 && (s[4] == '.' || s[4] == 0)) break;
+        if (strncasecmp(s, ".dat", 4) == 0) break;
+        unsigned char c = (unsigned char)*s;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out[o++] = (char)c;
+    }
+    out[o] = 0;
+    if (!out[0]) snprintf(out, cap, "unk");
+}
+
+/* Order matches melee efAsync_DatEntries; gfx_id = index * 1000 + local. */
+static const char *EF_DAT_FILES[] = {
+    "EfCoData.dat", "EfMrData.dat", "EfSsData.dat", "EfFxData.dat",
+    "EfCaData.dat", "EfKbData.dat", "EfLkData.dat", "EfPkData.dat",
+    "EfDkData.dat", "EfYsData.dat", "EfNsData.dat", "EfPrData.dat",
+    "EfKpData.dat", "EfMtData.dat", "EfIcData.dat", "EfPeData.dat",
+    "EfMsData.dat", "EfZdData.dat", "EfLgData.dat", "EfGnData.dat",
+    "EfKbMs.dat", "EfKbZd.dat", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    "EfMnData.dat", "EfKbMr.dat", "EfKbFx.dat", "EfKbSs.dat", NULL,
+    "EfKbPk.dat", "EfKbLg.dat", "EfKbCa.dat", "EfKbDk.dat", NULL,
+    "EfKbKp.dat", NULL, NULL, NULL, NULL, "EfKbIc.dat", "EfKbGn.dat",
+    "EfKbFe.dat", "EfFeData.dat", NULL,
+};
+#define EF_DAT_FILE_N (sizeof EF_DAT_FILES / sizeof EF_DAT_FILES[0])
+
+static int ef_table_index(const char *bn) {
+    for (int i = 0; i < (int)EF_DAT_FILE_N; i++)
+        if (EF_DAT_FILES[i] && strcasecmp(bn, EF_DAT_FILES[i]) == 0) return i;
+    return -1;
+}
+
+typedef struct {
+    char id[80];
+    char file[80];
+    int gfx;
+    int item_kind;
+} catalog_row_t;
+
+typedef struct {
+    catalog_row_t *rows;
+    size_t count, cap;
+} catalog_t;
+
+static void catalog_add(catalog_t *c, const char *id, const char *file, int gfx, int item_kind) {
+    if (c->count == c->cap) {
+        c->cap = c->cap ? c->cap * 2 : 64;
+        c->rows = realloc(c->rows, c->cap * sizeof *c->rows);
+        if (!c->rows) die("oom");
+    }
+    catalog_row_t *row = &c->rows[c->count++];
+    snprintf(row->id, sizeof row->id, "%s", id);
+    snprintf(row->file, sizeof row->file, "%s", file);
+    row->gfx = gfx;
+    row->item_kind = item_kind;
+}
+
+static const char *alias_for_gfx(int gfx) {
+    switch (gfx) {
+        case 11: return "shield";
+        case 12: return "powershield";
+        case 3000: return "shine";
+        case 3001: return "shine-start";
+        case 3002: return "shine-hit";
+        case 3003: return "firefox-charge";
+        case 3004: return "firefox";
+        default: return NULL;
+    }
+}
+
+static const char *alias_for_item(int kind) {
+    switch (kind) {
+        case 0x36: return "fox-laser";
+        case 0x37: return "falco-laser";
+        case 0x38: return "fox-illusion";
+        case 0x39: return "falco-phantasm";
+        default: return NULL;
+    }
+}
+
+/* Fox/Falco article list index → ItemKind. Shot/gun kinds are stored on ext_attr. */
+static int fighter_item_kind(const char *name, int index, const dat_t *d,
+                             const reloc_idx_t *ri, uint32_t ftdata_rel) {
+    uint32_t ext = rdptr(d, ri, ftdata_rel, 4);
+    int shot = -1, gun = -1;
+    if (ext && ext + 0x24 <= d->len) {
+        shot = (int)r32(d->bytes + ext + 0x1C);
+        gun = (int)r32(d->bytes + ext + 0x20);
+        if (shot < 0 || shot > 255) shot = -1;
+        if (gun < 0 || gun > 255) gun = -1;
+    }
+    if (strcmp(name, "fox") == 0) {
+        if (index == 0) return shot >= 0 ? shot : 0x36;
+        if (index == 1) return gun >= 0 ? gun : 0x4A;
+        if (index == 2) return 0x38;
+    } else if (strcmp(name, "falco") == 0) {
+        if (index == 0) return shot >= 0 ? shot : 0x37;
+        if (index == 1) return gun >= 0 ? gun : 0x4B;
+        if (index == 3) return 0x39;
+    }
+    return -1;
+}
+
+static int looks_like_jobj(const dat_t *d, uint32_t abs) {
+    if (abs < 0x20 || abs + 0x40 > d->reloc_start) return 0;
+    const uint8_t *j = d->bytes + abs;
+    uint32_t child = r32(j + 8), next = r32(j + 12), dobj = r32(j + 16);
+    float sx = rf32(j + 0x20), sy = rf32(j + 0x24), sz = rf32(j + 0x28);
+    if (!isfinite(sx) || !isfinite(sy) || !isfinite(sz)) return 0;
+    if (fabsf(sx) > 1000.f || fabsf(sy) > 1000.f || fabsf(sz) > 1000.f) return 0;
+    uint32_t ptrs[5] = { child, next, dobj, r32(j + 0x38), r32(j + 0x3C) };
+    for (int i = 0; i < 5; i++) {
+        if (!ptrs[i]) continue;
+        uint32_t a = dat_abs(d, ptrs[i]);
+        if (a < 0x20 || a >= d->reloc_start) return 0;
+    }
+    return 1;
+}
+
+static int write_joint_model(const dat_t *d, uint32_t joint_abs, const char *out,
+                             const char *file) {
+    if (!looks_like_jobj(d, joint_abs)) return 0;
+    asset_model_t *model = build_model(d, joint_abs - 0x20, NULL);
+    if (!model || !model->vertex_count || !model->index_count) return 0;
+    write_model_file(out, file, model);
+    return 1;
+}
+
+static void extract_effect_table(const dat_t *d, const reloc_idx_t *ri, uint32_t table_abs,
+                                 int table_index, const char *code, const char *out,
+                                 catalog_t *cat, unsigned *wrote) {
+    /* Public symbol is EF_DAT_Entry-shaped: +0 particle header, +4 bank, +8 EffectDesc[]. */
+    uint32_t descs_abs = table_abs + 8;
+    if (descs_abs + 0x14 > d->reloc_start) return;
+    uint32_t count = 0;
+    for (; count < 512; count++) {
+        uint32_t entry_abs = descs_abs + count * 0x14;
+        if (entry_abs + 0x14 > d->reloc_start) break;
+        uint32_t field = entry_abs + 4;
+        uint32_t raw = r32(d->bytes + field);
+        if (raw != 0 && !reloc_has(ri, field)) break;
+        float life = rf32(d->bytes + entry_abs);
+        if (!isfinite(life) || life < 0.f || life > 1e6f) break;
+        uint32_t joint = rdptr(d, ri, entry_abs - 0x20, 4);
+        if (joint && !looks_like_jobj(d, joint)) break;
+    }
+    printf("  effect table %s gfx %dxxx count=%u\n", code, table_index * 1000, count);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t entry_rel = (descs_abs - 0x20) + i * 0x14;
+        uint32_t joint = rdptr(d, ri, entry_rel, 4);
+        if (!joint) continue;
+        int gfx = table_index >= 0 ? table_index * 1000 + (int)i : -1;
+        char file[80];
+        snprintf(file, sizeof file, "ef-%s-%u.model", code, i);
+        if (!write_joint_model(d, joint, out, file)) continue;
+        const char *alias = gfx >= 0 ? alias_for_gfx(gfx) : NULL;
+        catalog_add(cat, alias ? alias : file, file, gfx, -1);
+        (*wrote)++;
+    }
+}
+
+static void extract_one_article(const dat_t *d, const reloc_idx_t *ri, uint32_t article,
+                                int kind, const char *fallback_file, const char *out,
+                                catalog_t *cat, unsigned *wrote);
+
+static void extract_article_array(const dat_t *d, const reloc_idx_t *ri, uint32_t array_abs,
+                                  int kind_base, const char *out, catalog_t *cat, unsigned *wrote) {
+    if (!array_abs) return;
+    size_t span = node_span_len(d, ri, array_abs);
+    uint32_t count = (uint32_t)(span / 4);
+    if (count > 512) count = 512;
+    printf("  article array base=%d count=%u\n", kind_base, count);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t article = rdptr(d, ri, array_abs - 0x20, i * 4);
+        int kind = kind_base + (int)i;
+        char fallback[80];
+        snprintf(fallback, sizeof fallback, "it-%d.model", kind);
+        extract_one_article(d, ri, article, kind, fallback, out, cat, wrote);
+    }
+}
+
+static void extract_one_article(const dat_t *d, const reloc_idx_t *ri, uint32_t article,
+                                int kind, const char *fallback_file, const char *out,
+                                catalog_t *cat, unsigned *wrote) {
+    if (!article) return;
+    uint32_t model_desc = rdptr(d, ri, article - 0x20, 0x10);
+    if (!model_desc) return;
+    uint32_t joint = rdptr(d, ri, model_desc - 0x20, 0);
+    if (!joint) return;
+    char file[80];
+    if (kind >= 0) snprintf(file, sizeof file, "it-%d.model", kind);
+    else snprintf(file, sizeof file, "%s", fallback_file);
+    if (!write_joint_model(d, joint, out, file)) return;
+    const char *alias = kind >= 0 ? alias_for_item(kind) : NULL;
+    char id[80];
+    if (alias) snprintf(id, sizeof id, "%s", alias);
+    else if (kind >= 0) snprintf(id, sizeof id, "item-%d", kind);
+    else snprintf(id, sizeof id, "%s", file);
+    catalog_add(cat, id, file, -1, kind);
+    (*wrote)++;
+}
+
+/* Character projectiles live on ftData.x48_items, not ItCo.dat. */
+static void extract_fighter_articles(const fst_list_t *dats, const uint8_t *iso,
+                                     const char *out, catalog_t *cat, unsigned *wrote) {
+    for (size_t ci = 0; ci < CHAR_INFO_N; ci++) {
+        const char_info_t *info = &CHAR_INFO[ci];
+        const fst_file_t *fc = iso_find(dats, info->data_dat);
+        if (!fc) continue;
+        dat_t d;
+        if (dat_open(iso + fc->offset, fc->size, &d)) continue;
+        reloc_idx_t ri;
+        reloc_build(&d, &ri);
+        uint32_t ftdata_rel = 0;
+        for (uint32_t r = 0; r < d.root_count; r++) {
+            uint32_t data_off = r32(d.bytes + d.roots_start + (size_t)r * 8);
+            uint32_t name_off = r32(d.bytes + d.roots_start + (size_t)r * 8 + 4);
+            if (strstr(dat_name(&d, name_off), "ftData")) { ftdata_rel = data_off; break; }
+        }
+        if (!ftdata_rel) { free(ri.offs); continue; }
+        uint32_t items = rdptr(&d, &ri, ftdata_rel, 0x48);
+        if (!items) { free(ri.offs); continue; }
+        size_t span = node_span_len(&d, &ri, items);
+        uint32_t count = (uint32_t)(span / 4);
+        if (count > 32) count = 32;
+        printf("  %s fighter articles count=%u\n", info->name, count);
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t article = rdptr(&d, &ri, items - 0x20, i * 4);
+            int kind = fighter_item_kind(info->name, (int)i, &d, &ri, ftdata_rel);
+            char fallback[80];
+            snprintf(fallback, sizeof fallback, "pl-%s-%u.model", info->name, i);
+            extract_one_article(&d, &ri, article, kind, fallback, out, cat, wrote);
+        }
+        free(ri.offs);
+    }
+}
+
+static void write_effects_catalog(const char *dir, const catalog_t *cat) {
+    char path[1200];
+    snprintf(path, sizeof path, "%s/effects.json", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) die("cannot write effects.json");
+    fputs("{\"schema\":4,\"aliases\":{", f);
+    int first = 1;
+    for (size_t i = 0; i < cat->count; i++) {
+        const char *alias = NULL;
+        if (cat->rows[i].gfx >= 0) alias = alias_for_gfx(cat->rows[i].gfx);
+        if (!alias && cat->rows[i].item_kind >= 0) alias = alias_for_item(cat->rows[i].item_kind);
+        if (!alias) continue;
+        fprintf(f, "%s\"%s\":\"%s\"", first ? "" : ",", alias, cat->rows[i].file);
+        first = 0;
+    }
+    fputs("},\"items\":{", f);
+    first = 1;
+    for (size_t i = 0; i < cat->count; i++) {
+        if (cat->rows[i].item_kind < 0) continue;
+        fprintf(f, "%s\"%d\":\"%s\"", first ? "" : ",", cat->rows[i].item_kind, cat->rows[i].file);
+        first = 0;
+    }
+    fputs("},\"gfx\":{", f);
+    first = 1;
+    for (size_t i = 0; i < cat->count; i++) {
+        if (cat->rows[i].gfx < 0) continue;
+        fprintf(f, "%s\"%d\":\"%s\"", first ? "" : ",", cat->rows[i].gfx, cat->rows[i].file);
+        first = 0;
+    }
+    fputs("}}\n", f);
+    fclose(f);
+    printf("wrote effects.json (%zu entries)\n", cat->count);
+}
+
+/* Walk eff*DataTable / itPublicData and dump every JOBJ mesh plus a catalog. */
+static void extract_effects(const fst_list_t *dats, const uint8_t *iso, const char *out) {
+    unsigned wrote = 0;
+    catalog_t cat = {0};
+    for (size_t i = 0; i < dats->count; i++) {
+        const char *path = dats->items[i].path;
+        const char *slash = strrchr(path, '/');
+        const char *bn = slash ? slash + 1 : path;
+        if (strncasecmp(bn, "It", 2) != 0 && strncasecmp(bn, "Ef", 2) != 0) continue;
+        dat_t d;
+        if (dat_open(iso + dats->items[i].offset, dats->items[i].size, &d)) continue;
+        reloc_idx_t ri; reloc_build(&d, &ri);
+        char code[32];
+        dat_code(bn, code, sizeof code);
+        printf("extracting effects from %s (%u roots)\n", bn, d.root_count);
+        for (uint32_t r = 0; r < d.root_count; r++) {
+            uint32_t data_off = r32(d.bytes + d.roots_start + (size_t)r * 8);
+            uint32_t name_off = r32(d.bytes + d.roots_start + (size_t)r * 8 + 4);
+            const char *nm = dat_name(&d, name_off);
+            uint32_t abs = dat_abs(&d, data_off);
+            if (strstr(nm, "DataTable") || strstr(nm, "eff")) {
+                extract_effect_table(&d, &ri, abs, ef_table_index(bn), code, out, &cat, &wrote);
+            } else if (strstr(nm, "itPublicData") || strstr(nm, "PublicData")) {
+                /* it_804D6D20_t: x4 common articles, x8 character articles. */
+                uint32_t common = rdptr(&d, &ri, data_off, 4);
+                uint32_t character = rdptr(&d, &ri, data_off, 8);
+                extract_article_array(&d, &ri, common, 0, out, &cat, &wrote);
+                extract_article_array(&d, &ri, character, 43, out, &cat, &wrote);
+            } else if (strstr(nm, "_joint") && !strstr(nm, "shapeanim") && !strstr(nm, "matanim")) {
+                char file[160];
+                snprintf(file, sizeof file, "%s-%u.model", code, r);
+                if (write_joint_model(&d, abs, out, file)) {
+                    catalog_add(&cat, file, file, -1, -1);
+                    wrote++;
+                }
+            }
+        }
+        free(ri.offs);
+    }
+    extract_fighter_articles(dats, iso, out, &cat, &wrote);
+    write_effects_catalog(out, &cat);
+    free(cat.rows);
+    printf("wrote %u item/effect meshes\n", wrote);
+}
+
 int main(int argc,char**argv){
     const char*iso_path="fixtures/game.iso";
     const char*out="cache";
     const char*which_char=NULL,*which_stage=NULL;
+    int want_effects=0;
     for(int i=1;i<argc;i++){
         if(strncmp(argv[i],"--iso=",6)==0)iso_path=argv[i]+6;
         else if(strncmp(argv[i],"--out=",6)==0)out=argv[i]+6;
         else if(strncmp(argv[i],"--char=",7)==0)which_char=argv[i]+7;
         else if(strncmp(argv[i],"--stage=",8)==0)which_stage=argv[i]+8;
+        else if(strcmp(argv[i],"--effects")==0)want_effects=1;
     }
 
     FILE*iso=fopen(iso_path,"rb");if(!iso)die("cannot open iso");
@@ -1277,6 +1655,7 @@ int main(int argc,char**argv){
             }
         }
     }
+    if(want_effects) extract_effects(&dats,iso_bytes,out);
     write_meta(out,ASSET_SCHEMA_VERSION);
     free(iso_bytes);
     printf("done\n");

@@ -53,4 +53,9 @@ test('action resolution and root-motion suppression match the C fallback policy'
   const dash = evaluator.evaluate(12, 0).boneRows;
   // Bone 1 rigid row Z translation is texel row 2, component W.
   assert.ok(Math.abs(bind[24 + 11] - dash[24 + 11]) < 1e-5);
+  const cliffWait = findAction(animations, 'ACTION_CliffWait');
+  assert.ok(cliffWait !== null);
+  const cliff = evaluator.evaluate(cliffWait, 0).boneRows;
+  assert.ok(Math.abs(bind[24 + 7] - cliff[24 + 7]) < 1e-5, 'cliff TransN Y must not double the replay hang');
+  assert.ok(Math.abs(bind[24 + 11] - cliff[24 + 11]) < 1e-5, 'cliff TransN Z must not double the replay hang');
 });

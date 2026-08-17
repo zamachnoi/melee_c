@@ -67,14 +67,16 @@ const sceneModule = await fetch(`${baseUrl}/replay/scene.js`);
 assert.equal(sceneModule.status, 200);
 assert.match(sceneModule.headers.get('content-type'), /text\/javascript/);
 
-const [softwarePage, webglPage] = await Promise.all([
+const [defaultPage, softwarePage, explicitWebglPage] = await Promise.all([
   fetch(`${baseUrl}/`).then(response => response.text()),
+  fetch(`${baseUrl}/?renderer=software`).then(response => response.text()),
   fetch(`${baseUrl}/?renderer=webgl2`).then(response => response.text()),
 ]);
+assert.match(defaultPage, /data-renderer="webgl2"/);
+assert.match(defaultPage, /Melee replay/);
+assert.match(explicitWebglPage, /data-renderer="webgl2"/);
 assert.match(softwarePage, /Melee 2D Replay/);
 assert.doesNotMatch(softwarePage, /data-renderer="webgl2"/);
-assert.match(webglPage, /data-renderer="webgl2"/);
-assert.match(webglPage, /Melee WebGL2 replay renderer/);
 
 const iceClimbersId = secondId;
 const iceManifest = second.manifest;
@@ -92,4 +94,16 @@ const replayList = await (await fetch(`${baseUrl}/api/replays`)).json();
 assert.equal(replayList.find(replay => replay.id === firstId).name, 'vertical.slp');
 assert.equal(replayList.find(replay => replay.id === iceClimbersId).name, 'ICs.slp');
 
-console.log(`HTTP integration passed: renderer flag isolation, distinct replays, ${first.bytes} byte timeline, Nana shared action bank`);
+const effectsCatalog = await fetch(`${baseUrl}/assets/v4/effects.json`);
+assert.equal(effectsCatalog.status, 200);
+assert.match(effectsCatalog.headers.get('content-type'), /application\/json/);
+const catalog = await effectsCatalog.json();
+assert.equal(catalog.schema, 4);
+assert.equal(catalog.aliases.shield, 'ef-co-11.model');
+assert.equal(catalog.aliases.shine, 'ef-fx-0.model');
+assert.equal(catalog.items['54'], 'it-54.model');
+const shineModel = await fetch(`${baseUrl}/assets/v4/models/${catalog.aliases.shine}`);
+assert.equal(shineModel.status, 200);
+assert.equal(shineModel.headers.get('content-type'), 'application/vnd.melee.model');
+
+console.log(`HTTP integration passed: WebGL2 default, software flag isolation, distinct replays, ${first.bytes} byte timeline, Nana shared action bank, extracted effect catalog`);

@@ -45,7 +45,7 @@ static int check_action(const char *name, float expected_z, float expected_y) {
 int main(void) {
     if (check_action("PlyFox_ACTION_AttackDash_figatree", 0, -15) != 0)
         return 1;
-    if (check_action("PlyFox_ACTION_CliffWait_figatree", 35, -15) != 0)
+    if (check_action("PlyFox_ACTION_CliffWait_figatree", 0, 0) != 0)
         return 1;
     puts("pose root-motion regression: passed");
     return 0;

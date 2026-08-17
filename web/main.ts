@@ -6,10 +6,17 @@ import { ReplayClock } from './replay/clock.js';
 import { ReplaySceneIndex } from './replay/scene.js';
 import { parseTimeline, type Timeline } from './replay/timeline.js';
 import {
-  fitCameraToBounds, followCamera, panCamera, setCamera, zoomCameraAt,
-  type CameraMode, type CameraState, type CameraViewport,
+  blendGameplayCamera, CAMERA_EYE_RATE, CAMERA_INTEREST_RATE,
+  createCameraState, fitCameraToBounds, gameplayCameraTarget, gameplayDistanceFromTimelineZoom,
+  gameplayLookTarget, meleeStageCamera,
+  panCamera, zoomCameraAt,
+  type CameraMode, type CameraState, type CameraSubject, type CameraViewport,
 } from './renderer/camera.js';
 import { isAcceptedFdSection } from './renderer/static-pose.js';
+import {
+  EFFECT_ALIAS_KEYS, effectAssetUrl, parseEffectCatalog,
+  type EffectCatalog, type EffectModelBank,
+} from './renderer/effects.js';
 import {
   WebGL2Renderer, type AnimatedFighter, type WebGLSceneSource,
 } from './renderer/webgl2.js';
@@ -70,7 +77,6 @@ export async function bootWebGL2(): Promise<void> {
   const canvas = element<HTMLCanvasElement>('glCanvas');
   const viewportElement = element<HTMLDivElement>('viewport');
   const replaySelect = element<HTMLSelectElement>('replaySelect');
-  const fighterSelect = element<HTMLSelectElement>('fighterSelect');
   const cameraModeSelect = element<HTMLSelectElement>('cameraMode');
   const frameSlider = element<HTMLInputElement>('frameSlider');
   const frameLabel = element<HTMLSpanElement>('frameLabel');
@@ -94,9 +100,12 @@ export async function bootWebGL2(): Promise<void> {
   const modelCache = new Map<string, ModelAsset>();
   const animationCache = new Map<string, AnimationsAsset>();
   const stageCache = new Map<string, StageAsset>();
+  const effectModelCache = new Map<string, ModelAsset>();
   const modelPending = new Map<string, Promise<CachedResult<ModelAsset>>>();
   const animationPending = new Map<string, Promise<CachedResult<AnimationsAsset>>>();
   const stagePending = new Map<string, Promise<CachedResult<StageAsset>>>();
+  const effectModelPending = new Map<string, Promise<CachedResult<ModelAsset>>>();
+  let effectCatalog: EffectCatalog | null | undefined;
 
   let timeline: Timeline | null = null;
   let sceneIndex: ReplaySceneIndex | null = null;
@@ -110,10 +119,13 @@ export async function bootWebGL2(): Promise<void> {
     stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
   };
   let frame = 0;
-  let camera: CameraState = { mode: 'melee', centerX: 0, centerY: 32, zoom: 3.45, targetPort: null, smoothing: 0 };
+  let camera: CameraState = createCameraState();
   const viewportSize: CameraViewport = { width: 960, height: 720 };
   let preferredCameraMode: AutomaticCameraMode = 'melee';
   let followSlot = 0;
+  let lastCameraIndex: number | null = null;
+  let lastBlendMode: AutomaticCameraMode | null = null;
+  let stageCameraSource: StageAsset | null = null;
   let requestCount = 0;
   let cameraMoves = 0;
   let loadController: AbortController | null = null;
@@ -127,11 +139,11 @@ export async function bootWebGL2(): Promise<void> {
   let debugVisible = false;
   const injectedAssetFailure = new URLSearchParams(location.search).get('failAsset');
 
-  const trackedFetch = async (url: string, signal?: AbortSignal): Promise<Response> => {
+  const trackedFetch = async (url: string, init?: RequestInit): Promise<Response> => {
     requestCount++;
     if (injectedAssetFailure && url.includes(injectedAssetFailure))
       throw new Error(`${url}: injected asset failure`);
-    const response = await fetch(url, { signal });
+    const response = await fetch(url, init);
     if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
     return response;
   };
@@ -170,18 +182,110 @@ export async function bootWebGL2(): Promise<void> {
     return { manifest: asset, model, animations, wireBytes, warnings };
   };
 
+  const loadEffectCatalog = async (): Promise<EffectCatalog | null> => {
+    if (effectCatalog !== undefined) return effectCatalog;
+    try {
+      const response = await trackedFetch('/assets/v4/effects.json');
+      effectCatalog = parseEffectCatalog(await response.json());
+      return effectCatalog;
+    } catch (error) {
+      effectCatalog = null;
+      assetWarnings.push(`effect catalog unavailable: ${errorMessage(error)}`);
+      return null;
+    }
+  };
+
+  const loadEffectBank = async (timeline: Timeline): Promise<{ bank: EffectModelBank; wireBytes: number }> => {
+    const byAlias: Record<string, ModelAsset> = {};
+    const byItem: Record<number, ModelAsset> = {};
+    const catalog = await loadEffectCatalog();
+    if (!catalog) return { bank: { byAlias, byItem }, wireBytes: 0 };
+    const files = new Map<string, { aliases: string[]; items: number[] }>();
+    const add = (file: string | undefined, alias?: string, item?: number): void => {
+      if (!file) return;
+      let entry = files.get(file);
+      if (!entry) {
+        entry = { aliases: [], items: [] };
+        files.set(file, entry);
+      }
+      if (alias) entry.aliases.push(alias);
+      if (item !== undefined) entry.items.push(item);
+    };
+    for (const alias of EFFECT_ALIAS_KEYS) add(catalog.aliases[alias], alias);
+    const itemIds = new Set<number>([0x36, 0x37, 0x38, 0x39]);
+    for (const item of timeline.items) itemIds.add(item.typeId);
+    for (const id of itemIds) add(catalog.items[String(id)], undefined, id);
+    let wireBytes = 0;
+    await Promise.all([...files.entries()].map(async ([file, refs]) => {
+      try {
+        const result = await loadCached(effectAssetUrl(file), effectModelCache, effectModelPending, parseModel);
+        wireBytes += result.wireBytes;
+        for (const alias of refs.aliases) byAlias[alias] = result.asset;
+        for (const id of refs.items) byItem[id] = result.asset;
+      } catch (error) {
+        assetWarnings.push(`${file} unavailable: ${errorMessage(error)}`);
+      }
+    }));
+    return { bank: { byAlias, byItem }, wireBytes };
+  };
+
   const measureViewport = (): void => {
     const rect = canvas.getBoundingClientRect();
     viewportSize.width = Math.max(1, rect.width);
     viewportSize.height = Math.max(1, rect.height);
   };
 
-  const selectedSlot = (): number => Number(fighterSelect.value);
+  const selectedSlot = (): number => followSlot;
 
-  const applyOriginalCamera = (index: number): void => {
-    if (!timeline?.camera) setCamera(camera, 'melee', 0, 32, 3.45 * viewportSize.height / 720);
-    else setCamera(camera, 'melee', timeline.camera.x[index], timeline.camera.y[index],
-      timeline.camera.zoom[index] * viewportSize.height / 720);
+  const cameraSubjects = (index: number, slotIndex?: number): CameraSubject[] => {
+    if (!timeline) return [];
+    const subjects: CameraSubject[] = [];
+    const slots = slotIndex === undefined ? timeline.slots : [timeline.slots[slotIndex]];
+    for (const slot of slots) {
+      if (!slot?.active || !slot.presence[index] || !slot.stocks[index]) continue;
+      if (slotIndex === undefined && slot.follower) continue;
+      const x = slot.x[index], y = slot.y[index];
+      if (Math.abs(x) > 300 || y < -120 || y > 240) continue;
+      subjects.push({ x, y, facing: slot.facing[index] });
+    }
+    return subjects;
+  };
+
+  const cameraBlendRates = (index: number, interestAlreadySmoothed: boolean): { interest: number; eye: number; steps: number } => {
+    const previous = lastCameraIndex;
+    const jumped = previous === null || lastBlendMode !== preferredCameraMode
+      || Math.abs(index - previous) > 4;
+    const steps = jumped ? 1 : Math.max(1, Math.abs(index - previous) || 1);
+    lastCameraIndex = index;
+    lastBlendMode = preferredCameraMode;
+    if (jumped) return { interest: 1, eye: 1, steps: 1 };
+    return {
+      interest: interestAlreadySmoothed ? 1 : CAMERA_INTEREST_RATE,
+      eye: CAMERA_EYE_RATE,
+      steps,
+    };
+  };
+
+  const applyOriginalCamera = (index: number, rates?: { interest: number; eye: number; steps: number }): void => {
+    const fallback = meleeStageCamera(viewportSize, stageCameraSource);
+    const solved = gameplayCameraTarget(cameraSubjects(index));
+    const blend = rates ?? cameraBlendRates(index, true);
+    if (timeline?.camera && solved) {
+      blendGameplayCamera(
+        camera, viewportSize,
+        gameplayLookTarget(
+          timeline.camera.x[index], timeline.camera.y[index],
+          gameplayDistanceFromTimelineZoom(timeline.camera.zoom[index]),
+          solved,
+        ),
+        'melee', blend,
+      );
+    } else if (solved) {
+      blendGameplayCamera(camera, viewportSize, solved, 'melee', blend);
+    } else {
+      Object.assign(camera, fallback);
+    }
+    camera.mode = 'melee';
     camera.targetPort = null;
   };
 
@@ -203,8 +307,11 @@ export async function bootWebGL2(): Promise<void> {
   const applyFollowCamera = (index: number): void => {
     if (!timeline) return;
     const slot = timeline.slots[followSlot];
-    if (slot?.presence[index]) followCamera(camera, viewportSize, slot.x[index], slot.y[index], slot.port);
-    else applyOriginalCamera(index);
+    const solved = gameplayCameraTarget(cameraSubjects(index, followSlot));
+    if (solved && slot?.presence[index]) {
+      blendGameplayCamera(camera, viewportSize, solved, 'follow', cameraBlendRates(index, false));
+      camera.targetPort = slot.port;
+    } else applyOriginalCamera(index, { interest: 1, eye: 1, steps: 1 });
   };
 
   const applyAutomaticCamera = (index: number): void => {
@@ -263,9 +370,13 @@ export async function bootWebGL2(): Promise<void> {
         fighter.rootX = slot.x[index]; fighter.rootY = slot.y[index]; fighter.facing = slot.facing[index];
         fighter.actionState = slot.actionState[index]; fighter.shield = slot.shield[index];
         fighter.percent = slot.percent[index]; fighter.stocks = slot.stocks[index];
+        fighter.characterId = slot.character[index];
         if (fighter.visible && runtime.evaluator && runtime.animated) {
           runtime.pose = runtime.evaluator.evaluate(slot.animationIndex[index], slot.animationFrame[index]);
           fighter.poseVersion++;
+          fighter.actionName = runtime.pose.actionName;
+        } else {
+          fighter.actionName = runtime.pose?.actionName ?? null;
         }
       }
       const hudEntry = hudEntries[runtimeIndex];
@@ -408,6 +519,8 @@ export async function bootWebGL2(): Promise<void> {
 
   const reset = (): void => {
     if (!timeline) return;
+    lastCameraIndex = null;
+    lastBlendMode = null;
     camera.mode = preferredCameraMode; applyAutomaticCamera(frame - timeline.startFrame);
     cameraMoves++; renderCurrent(); updateDiagnostics();
   };
@@ -441,7 +554,7 @@ export async function bootWebGL2(): Promise<void> {
       const port = Number(event.code.at(-1)) - 1;
       const slotIndex = timeline.slots.findIndex(slot => slot.active && !slot.follower && slot.port === port);
       if (slotIndex >= 0) {
-        followSlot = slotIndex; fighterSelect.value = String(slotIndex);
+        followSlot = slotIndex;
         preferredCameraMode = 'follow'; cameraModeSelect.value = 'follow'; camera.mode = 'follow'; reset();
       }
     }
@@ -469,7 +582,7 @@ export async function bootWebGL2(): Promise<void> {
     loadedWireBytes = 0; assetWarnings = [];
     status.classList.remove('error'); status.textContent = 'Loading manifest…';
     try {
-      const manifestResponse = await trackedFetch(`/api/replays/${id}/manifest`, controller.signal);
+      const manifestResponse = await trackedFetch(`/api/replays/${id}/manifest`, { signal: controller.signal });
       manifest = await manifestResponse.json() as ReplayManifest;
       const fighterAssets = manifest.assets.filter((value): value is FighterAsset =>
         typeof value.model === 'string' && typeof value.animations === 'string' && value.slot !== undefined)
@@ -477,7 +590,7 @@ export async function bootWebGL2(): Promise<void> {
       const stageAsset = manifest.assets.find(value => typeof value.stage === 'string');
       status.textContent = 'Loading complete replay scene and reusable assets…';
       const timelinePromise = (async () => {
-        const response = await trackedFetch(manifest!.timelineUrl, controller.signal);
+        const response = await trackedFetch(manifest!.timelineUrl, { signal: controller.signal });
         const buffer = await response.arrayBuffer();
         return { timeline: parseTimeline(buffer), wireBytes: buffer.byteLength };
       })();
@@ -487,11 +600,13 @@ export async function bootWebGL2(): Promise<void> {
           assetWarnings.push(`stage unavailable: ${errorMessage(error)}`); return null;
         })
         : Promise.resolve(null);
-      const [timelineResult, loadedFighters, loadedStage] = await Promise.all([timelinePromise, fightersPromise, stagePromise]);
+      const effectsPromise = timelinePromise.then(({ timeline }) => loadEffectBank(timeline));
+      const [timelineResult, loadedFighters, loadedStage, effectResult] = await Promise.all(
+        [timelinePromise, fightersPromise, stagePromise, effectsPromise]);
       if (controller.signal.aborted) return;
       timeline = timelineResult.timeline;
       sceneIndex = new ReplaySceneIndex(timeline);
-      loadedWireBytes = timelineResult.wireBytes + (loadedStage?.wireBytes ?? 0);
+      loadedWireBytes = timelineResult.wireBytes + (loadedStage?.wireBytes ?? 0) + effectResult.wireBytes;
       for (const loaded of loadedFighters) loadedWireBytes += loaded.wireBytes;
       for (const loaded of loadedFighters) assetWarnings.push(...loaded.warnings);
       if (!stageAsset?.stage) assetWarnings.push(`stage asset missing for ${manifest.stageName}`);
@@ -510,7 +625,8 @@ export async function bootWebGL2(): Promise<void> {
           slot: loaded.manifest.slot, port: slot.port, follower: slot.follower,
           model: loaded.model, boneRows: pose.boneRows, poseVersion: 0,
           label: `${player?.name || `P${slot.port + 1}`}${slot.follower ? ' · Nana' : ''}`,
-          rootX: 0, rootY: 0, facing: 1, visible: true, actionState: 0, shield: 0, percent: 0,
+          rootX: 0, rootY: 0, facing: 1, visible: true, actionState: 0, actionName: null,
+          characterId: slot.character[0] ?? 0, shield: 0, percent: 0,
           stocks: player?.startingStocks ?? 0,
         };
         return {
@@ -527,28 +643,26 @@ export async function bootWebGL2(): Promise<void> {
       let stageScale = 1;
       if (loadedStage) {
         stageScale = loadedStage.asset.scale;
+        stageCameraSource = loadedStage.asset;
         stageSections = manifest.stageName === 'Final Destination'
           ? loadedStage.asset.sections.filter(isAcceptedFdSection)
           : loadedStage.asset.sections;
         if (!stageSections.length) assetWarnings.push(`no visible stage sections for ${manifest.stageName}`);
+      } else {
+        stageCameraSource = null;
       }
       source = {
         stageSections, stageScale, fighters, items: timeline.items, itemStart: 0, itemEnd: 0,
         stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
+        effectModels: effectResult.bank,
       };
       renderer.setScene(source);
       buildHud();
-      fighterSelect.replaceChildren(...runtimes.map(runtime => {
-        const option = document.createElement('option');
-        option.value = String(runtime.slot);
-        option.textContent = runtime.source?.label ?? `slot ${runtime.slot} · unavailable`;
-        return option;
-      }));
       const slotParameter = new URLSearchParams(location.search).get('slot');
       const requestedSlot = slotParameter === null ? Number.NaN : Number(slotParameter);
       const selected = runtimes.some(runtime => runtime.slot === requestedSlot)
         ? requestedSlot : (runtimes.find(runtime => !timeline!.slots[runtime.slot].follower)?.slot ?? runtimes[0]?.slot ?? 0);
-      fighterSelect.value = String(selected); followSlot = selected;
+      followSlot = selected;
       frameSlider.min = String(timeline.startFrame); frameSlider.max = String(timeline.endFrame);
       const frameParameter = new URLSearchParams(location.search).get('frame');
       const requestedFrame = frameParameter === null ? Number.NaN : Number(frameParameter);
@@ -556,6 +670,8 @@ export async function bootWebGL2(): Promise<void> {
         ? requestedFrame : Math.max(timeline.startFrame, Math.min(timeline.endFrame, 8));
       clock = new ReplayClock(timeline.startFrame, timeline.endFrame, initialFrame);
       camera.mode = preferredCameraMode;
+      lastCameraIndex = null;
+      lastBlendMode = null;
       sceneLabel.textContent = `${manifest.name} · ${fighters.length}/${fighterAssets.length} fighters · ${manifest.stageName} · complete local scene`;
       warningOverlay.textContent = assetWarnings.join('\n'); warningOverlay.hidden = assetWarnings.length === 0;
       document.title = `Melee WebGL2 — ${manifest.name}`;
@@ -564,7 +680,8 @@ export async function bootWebGL2(): Promise<void> {
         ? `Replay ready with ${assetWarnings.length} visible asset warning${assetWarnings.length === 1 ? '' : 's'}`
         : 'Complete WebGL2 replay ready — all scene state and cameras are local';
       const url = new URL(location.href);
-      url.searchParams.set('renderer', 'webgl2'); url.searchParams.set('replay', id);
+      if (url.searchParams.get('renderer') === 'software') url.searchParams.delete('renderer');
+      url.searchParams.set('replay', id);
       url.searchParams.set('slot', String(selected)); history.replaceState(null, '', url);
       updateDiagnostics();
       if (new URLSearchParams(location.search).get('autoplay') === '1') togglePlayback();
@@ -574,25 +691,51 @@ export async function bootWebGL2(): Promise<void> {
     }
   };
 
-  const replayResponse = await trackedFetch('/api/replays');
-  const replays = await replayResponse.json() as ReplayListItem[];
-  replaySelect.replaceChildren(...replays.map(replay => {
-    const option = document.createElement('option'); option.value = replay.id; option.textContent = replay.name; return option;
-  }));
-  if (!replays.length) throw new Error('No replay is available. Upload one in the software viewer first.');
-  const requestedReplay = new URLSearchParams(location.search).get('replay');
-  replaySelect.value = replays.some(replay => replay.id === requestedReplay) ? requestedReplay! : replays[0].id;
+  const fillReplaySelect = (replays: ReplayListItem[], selectedId?: string): void => {
+    replaySelect.replaceChildren(...replays.map(replay => {
+      const option = document.createElement('option');
+      option.value = replay.id; option.textContent = replay.name; return option;
+    }));
+    if (selectedId && replays.some(replay => replay.id === selectedId)) replaySelect.value = selectedId;
+  };
+
+  const replayFile = element<HTMLInputElement>('replayFile');
+  replayFile.addEventListener('change', () => {
+    const file = replayFile.files?.[0];
+    replayFile.value = '';
+    if (!file) return;
+    void (async () => {
+      status.classList.remove('error');
+      status.textContent = `Uploading ${file.name}…`;
+      try {
+        const response = await trackedFetch('/api/replays', {
+          method: 'POST', body: file, headers: { 'X-Replay-Name': file.name },
+        });
+        const created = await response.json() as { id: string };
+        const uploaded = await trackedFetch('/api/replays').then(value => value.json()) as ReplayListItem[];
+        fillReplaySelect(uploaded, created.id);
+        await loadReplay(created.id);
+      } catch (error) {
+        status.classList.add('error'); status.textContent = errorMessage(error);
+      }
+    })();
+  });
   replaySelect.addEventListener('change', () => {
     const url = new URL(location.href); url.searchParams.delete('slot'); history.replaceState(null, '', url);
     void loadReplay(replaySelect.value).catch(console.error);
   });
-  fighterSelect.addEventListener('change', () => {
-    followSlot = selectedSlot();
-    const url = new URL(location.href); url.searchParams.set('slot', fighterSelect.value); history.replaceState(null, '', url);
-    if (preferredCameraMode === 'follow') reset();
-    if (timeline) updateFrame(frame);
-  });
-  await loadReplay(replaySelect.value);
+
+  const replayResponse = await trackedFetch('/api/replays');
+  const replays = await replayResponse.json() as ReplayListItem[];
+  const requestedReplay = new URLSearchParams(location.search).get('replay');
+  const selectedReplay = replays.some(replay => replay.id === requestedReplay) ? requestedReplay! : replays[0]?.id;
+  fillReplaySelect(replays, selectedReplay);
+  if (!selectedReplay) {
+    sceneLabel.textContent = 'No replay loaded';
+    status.textContent = 'No replay is available. Load an .slp file to start.';
+    return;
+  }
+  await loadReplay(selectedReplay);
 }
 
 if (typeof document !== 'undefined' && document.documentElement.dataset.renderer === 'webgl2') {

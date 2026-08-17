@@ -3,6 +3,7 @@
 body{background:#15171c;color:#ddd;font-family:ui-monospace,monospace;
 margin:0;padding:12px;text-align:center}
 h1{font-size:16px;font-weight:600;margin:0 0 8px;color:#9ab}
+h1 a{color:#7fd6a6;text-decoration:none;font-size:12px;border:1px solid #315544;border-radius:999px;padding:2px 8px;margin-left:8px;vertical-align:middle}
 #wrap{display:inline-block;position:relative}
 canvas{background:#000;border:1px solid #333;border-radius:4px;
 width:960px;height:auto;max-width:100%}
@@ -18,7 +19,7 @@ input[type=range]{flex:1;min-width:200px}
 #frameLabel{font-size:13px;min-width:180px;text-align:left}
 #help{color:#666;font-size:11px;margin-top:6px}
 </style></head><body>
-<h1>Melee 2D Replay</h1>
+<h1>Melee 2D Replay <a href="/">WebGL2</a></h1>
 <div id=wrap><canvas id=cv width=960 height=720></canvas>
 <div id=hud></div></div>
 <div id=bar>
@@ -28,7 +29,7 @@ input[type=range]{flex:1;min-width:200px}
 <span id=frameLabel></span>
 <label>Load replay: <input type=file id=file accept=.slp></label>
 </div>
-<div id=help>Space play/pause &middot; &larr;/&rarr; step &middot; Home/End first/last &middot; drag canvas to scrub</div>
+<div id=help>Space play/pause &middot; &larr;/&rarr; step &middot; Home/End first/last &middot; drag canvas to scrub &middot; software / C reference</div>
 <script>
 const cv=document.getElementById('cv');
 const sel=document.getElementById('sel'),sl=document.getElementById('slider');

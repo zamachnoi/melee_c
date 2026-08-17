@@ -232,7 +232,13 @@ export class PoseEvaluator {
         if (bone === 0) {
           tx = this.baseTranslation[0]; ty = this.baseTranslation[1]; tz = this.baseTranslation[2];
         }
-        if (bone === 1 && !ledgeAnchored) tz = this.baseTranslation[5];
+        if (bone === 1) {
+          tz = this.baseTranslation[5];
+          if (ledgeAnchored) {
+            tx = this.baseTranslation[3];
+            ty = this.baseTranslation[4];
+          }
+        }
         matrixFromSrt(sx, sy, sz, rx, ry, rz, tx, ty, tz, this.local, bone * MATRIX_FLOATS);
       }
     }

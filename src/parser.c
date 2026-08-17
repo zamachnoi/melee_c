@@ -955,6 +955,8 @@ static const struct {
     {0x1E, "Screw Attack"},      {0x1F, "Bunny Hood"},
     {0x20, "Metal Box"},         {0x21, "Cloaking Device"},
     {0x22, "Poke Ball"},
+    {0x36, "Fox Laser"},         {0x37, "Falco Laser"},
+    {0x38, "Fox Illusion"},      {0x39, "Falco Phantasm"},
 };
 
 const char *slp_item_name(uint16_t id) {
