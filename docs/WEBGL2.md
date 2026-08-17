@@ -105,7 +105,8 @@ Measured on 2026-08-17 in Chromium:
   (`make cache` / `extract --effects`). Procedural geometry is the fallback
   when a catalog entry or model file is missing.
 - Shields use gfx 11's in-game billboard: the I4 quadrant is mirrored into a
-  full circle and multiplied by the IA8 bubble lighting, then port-tinted and
+  full circle and used as the bubble's coverage alpha, the IA8 lighting shades
+  the port tint (instead of darkening it toward black), and the result is
   scaled to remaining shield size.
 - FoD's two moving platforms are the actual stage-section meshes (section 2
   bones 2/3 and the matching pass on section 3), re-posed so the mesh top

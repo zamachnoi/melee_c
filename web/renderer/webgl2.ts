@@ -110,9 +110,9 @@ void main() {
   vec4 tex = texture(u_texture, v_uv);
   if (u_mirrorMask) {
     vec2 maskUv = vec2(mirrorCoord(v_uv.x * 2.0), mirrorCoord(v_uv.y * 2.0 - 1.0));
-    tex = texture(u_texture, maskUv);
+    vec4 mask = texture(u_texture, maskUv);
     vec4 detail = texture(u_detail, v_uv);
-    tex = vec4(detail.rgb * tex.rgb, detail.a * tex.a);
+    tex = vec4(mix(vec3(0.35), vec3(1.35), detail.r) * mask.a, detail.a * mask.a);
   }
   outColor = tex * u_tint * v_color;
   if (outColor.a <= 0.0) discard;
@@ -795,7 +795,7 @@ export class WebGL2Renderer implements Renderer {
   private drawMesh(
     mesh: GpuMesh, camera: CameraState, profile: boolean,
     rootX: number, rootY: number, facing: number, modelScale: number,
-    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; skinnedStage?: boolean },
+    extra?: { billboard?: boolean; ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; dirX?: number; dirY?: number; tint?: readonly [number, number, number, number]; skinnedStage?: boolean; profileItem?: boolean; facing?: number },
   ): void {
     if (!this.programs || !this.whiteTexture) return;
     const gl = this.gl;
@@ -804,9 +804,9 @@ export class WebGL2Renderer implements Renderer {
     gl.bindVertexArray(mesh.vao);
     gl.uniformMatrix4fv(u.viewProjection, false, this.viewProjection);
     gl.uniform2f(u.replayRoot, rootX, rootY);
-    gl.uniform1f(u.facing, facing < 0 ? -1 : 1);
+    gl.uniform1f(u.facing, (extra?.facing ?? facing) < 0 ? -1 : 1);
     gl.uniform1f(u.modelScale, modelScale);
-    gl.uniform1i(u.profile, profile ? 1 : 0);
+    gl.uniform1i(u.profile, profile || extra?.profileItem ? 1 : 0);
     gl.uniform1i(u.skinned, profile || extra?.skinnedStage ? 1 : 0);
     gl.uniform1i(u.billboard, extra?.billboard ? 1 : 0);
     gl.uniform1i(u.ray, extra?.ray ? 1 : 0);
@@ -996,12 +996,13 @@ export class WebGL2Renderer implements Renderer {
   private drawExtracted(
     mesh: GpuMesh, originX: number, originY: number, scale: number,
     dirX: number, dirY: number,
-    extra?: { ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; tint?: readonly [number, number, number, number] },
+    extra?: { ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; tint?: readonly [number, number, number, number]; profileItem?: boolean; facing?: number },
   ): void {
     if (!this.hasLastCamera) return;
     this.drawMesh(mesh, this.lastCamera, false, originX, originY, 1, scale, {
       billboard: !extra?.viewBillboard, ray: extra?.ray, viewBillboard: extra?.viewBillboard,
       mirrorMask: extra?.mirrorMask, dirX, dirY, tint: extra?.tint,
+      profileItem: extra?.profileItem, facing: extra?.facing,
     });
   }
 
@@ -1099,7 +1100,10 @@ export class WebGL2Renderer implements Renderer {
         const color = isFoxIllusion(item.typeId) ? FOX_LASER_COLOR : FALCO_LASER_COLOR;
         const length = Math.max(16, laserLength(item.velocityX, item.velocityY) * 1.4);
         if (extractedItem) {
-          this.drawExtracted(extractedItem, item.x, item.y, 1, dirX, dirY, { ray: true });
+          this.drawExtracted(extractedItem, item.x, item.y, 1, dirX, dirY, {
+            profileItem: true, facing: item.facing,
+            tint: [color[0], color[1], color[2], 0.45],
+          });
         } else {
           bindEffectProgram();
           this.drawEffect(this.laserMesh, EffectKind.Laser,
