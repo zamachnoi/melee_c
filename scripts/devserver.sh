@@ -103,10 +103,7 @@ export ASSET_DIR="${ASSET_DIR:-$root/cache}"
 if [ ! -e "$SLP_DIR" ]; then
     ln -s fixtures "$SLP_DIR"
 fi
-if [ ! -e "$root/cache" ]; then
-    mkdir -p "$root/fixtures/cache"
-    ln -s fixtures/cache "$root/cache"
-fi
+"$root/scripts/ensure-shared-cache.sh"
 
 # run in background, tracking PID so the next call can reclaim the port
 "$root/bin/viewer" &

@@ -9,6 +9,8 @@
  * ftData item list, then writes schema-4 `.model` files plus `effects.json`.
  *
  * Usage: extract --iso=game.iso --out=cache [--char=falco] [--stage=FD] [--effects] [--icons]
+ *        extract --all   (every character, stage, effect, and stock icon)
+ *        extract --print-cache-id
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -1404,7 +1406,8 @@ static void write_stage(FILE*f,const asset_stage_t*s){
 static void write_meta(const char*dir,uint32_t schema){
     char path[1200];snprintf(path,sizeof path,"%s/meta.json",dir);
     FILE*f=fopen(path,"w");if(!f)return;
-    fprintf(f,"{\"schema_version\":%u,\"iso\":\"melee\"}\n",schema);
+    fprintf(f,"{\"schema_version\":%u,\"iso\":\"melee\",\"cache_id\":%u}\n",
+            schema, ASSET_CACHE_ID);
     fclose(f);
 }
 
@@ -2256,6 +2259,10 @@ int main(int argc,char**argv){
     const char*which_char=NULL,*which_stage=NULL;
     int want_effects=0,all_mode=0,want_icons=0;
     for(int i=1;i<argc;i++){
+        if(strcmp(argv[i],"--print-cache-id")==0){
+            printf("%u\n",ASSET_CACHE_ID);
+            return 0;
+        }
         if(strncmp(argv[i],"--iso=",6)==0)iso_path=argv[i]+6;
         else if(strncmp(argv[i],"--out=",6)==0)out=argv[i]+6;
         else if(strncmp(argv[i],"--char=",7)==0)which_char=argv[i]+7;

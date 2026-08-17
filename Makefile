@@ -77,8 +77,14 @@ test-http: web-build
 	@. ./dev-server.env && DEV_URL="$$DEV_URL" node tests/http.integration.mjs
 
 cache: $(BIN)/extract_tool
-	@if [ ! -e cache ]; then mkdir -p fixtures/cache && ln -s fixtures/cache cache; fi
+	scripts/ensure-shared-cache.sh
 	$(BIN)/extract_tool --iso=fixtures/game.iso --all --out=cache
+
+# Point every local worktree's cache/ at the shared fixtures/cache.
+share-cache:
+	@git worktree list --porcelain | awk '/^worktree /{print $$2}' | while read -r wt; do \
+		scripts/ensure-shared-cache.sh "$$wt"; \
+	done
 
 test_asset: cache $(BIN)/test_asset
 	$(BIN)/test_asset cache/fox-0.model cache/fox-0.anims cache/fd.stage
@@ -117,4 +123,4 @@ dump: $(BIN)/datdump
 clean:
 	rm -rf $(BIN) $(BUILD)
 
-.PHONY: all test typecheck web-build measure-assets golden-fixtures test-http cache test_asset run viewer dump clean
+.PHONY: all test typecheck web-build measure-assets golden-fixtures test-http cache share-cache test_asset run viewer dump clean

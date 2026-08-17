@@ -16,6 +16,9 @@
 #include <stdint.h>
 
 #define ASSET_SCHEMA_VERSION 4
+/* Bump when extract --all writes a new class of files (e.g. stage .anims).
+   Persistent Docker volumes rebuild when meta.json cache_id does not match. */
+#define ASSET_CACHE_ID 1
 #define ASSET_MAGIC 0x4D444C00u /* "MDL\0" for models */
 
 /* ---- model (shared by characters and stage sections) ---- */

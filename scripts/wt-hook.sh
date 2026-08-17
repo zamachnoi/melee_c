@@ -13,6 +13,14 @@ set -eu
 
 # guiHook/resetHook are invoked with $1 = the new worktree path, cwd = worktree.
 wt="${1:-$PWD}"
+
+# Share the machine-wide DAT cache using this checkout's script so older
+# worktree branches (without the file) still get cache -> fixtures/cache.
+hook_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+if [ -x "$hook_dir/ensure-shared-cache.sh" ]; then
+    "$hook_dir/ensure-shared-cache.sh" "$wt"
+fi
+
 if [ ! -f "$wt/scripts/devserver.sh" ]; then
     exit 0
 fi

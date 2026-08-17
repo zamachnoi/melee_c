@@ -19,9 +19,10 @@ services:
       - replays:/data/replays
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/replays >/dev/null"]
-      interval: 10s
-      timeout: 3s
+      interval: 2s
+      timeout: 2s
       retries: 5
-      start_period: 10s
+      # Full ISO extract on a stale volume can take several minutes.
+      start_period: 1200s
 volumes:
   replays:
