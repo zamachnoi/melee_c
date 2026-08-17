@@ -52,22 +52,26 @@ select,button,input{font:12px inherit;color:#dce6f5;background:#171d28;border:1p
     <input id="frameSlider" type="range" min="0" max="1" value="0" aria-label="Replay frame">
     <span id="frameLabel">frame 0</span>
   </div>
-  <div id="status" class="readout">Starting WebGL2…</div>
+  <div id="status" class="readout">Loading viewer…</div>
   <div id="diagnostics" class="readout"></div>
   <p class="help">Space play/pause · ←/→ step · drag to pan · wheel to zoom · double-click reset · 1–4 follow player · ` debug · <a href="/?renderer=software">software renderer</a></p>
 </main>
 <script data-cfasync="false">
-fetch('/api/replays').then(function(r){return r.json();}).then(function(list){
-  var sel=document.getElementById('replaySelect');
-  if(!sel||sel.dataset.filled==='1')return;
-  sel.replaceChildren();
-  for(var i=0;i<list.length;i++){
-    var o=document.createElement('option');
-    o.value=list[i].id; o.textContent=list[i].name; sel.append(o);
-  }
-  if(!list.length){var empty=document.createElement('option');empty.disabled=true;empty.textContent='No replays';sel.append(empty);}
-}).catch(function(){});
+(function(){
+  var status=document.getElementById('status');
+  if(status) status.textContent='Loading viewer…';
+  fetch('/api/replays').then(function(r){return r.json();}).then(function(list){
+    var sel=document.getElementById('replaySelect');
+    if(!sel||sel.dataset.filled==='1')return;
+    sel.replaceChildren();
+    for(var i=0;i<list.length;i++){
+      var o=document.createElement('option');
+      o.value=list[i].id; o.textContent=list[i].name; sel.append(o);
+    }
+    if(!list.length){var empty=document.createElement('option');empty.disabled=true;empty.textContent='No replays';sel.append(empty);}
+  }).catch(function(){});
+})();
 </script>
-<script type="module" src="/main.js" data-cfasync="false"></script>
+<script src="/main.js" data-cfasync="false" onerror="var s=document.getElementById('status');if(s){s.className='readout error';s.textContent='Failed to load /main.js';}"></script>
 </body>
 </html>

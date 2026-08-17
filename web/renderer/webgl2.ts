@@ -297,11 +297,16 @@ export interface RendererCapabilities {
 }
 
 const WEBGL2_CONTEXT_ATTRIBUTES: WebGLContextAttributes[] = [
+  /* iOS Safari composites a blank canvas with alpha:false / preserveDrawingBuffer:false. */
+  {
+    alpha: true, antialias: false, depth: true, premultipliedAlpha: true,
+    preserveDrawingBuffer: true,
+  },
   {
     alpha: false, antialias: false, depth: true, premultipliedAlpha: false,
     preserveDrawingBuffer: false,
   },
-  { alpha: false, depth: true },
+  { depth: true },
 ];
 
 function createWebGL2Context(canvas: HTMLCanvasElement): WebGL2RenderingContext {
