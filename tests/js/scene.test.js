@@ -21,9 +21,9 @@ test('dynamic stage state persists after sparse events', () => {
   const scene = new ReplaySceneIndex(timeline);
   const current = 0 - timeline.startFrame;
   const next = 1 - timeline.startFrame;
-  assert.equal(scene.fodLeft[current], 31.5);
-  assert.equal(scene.fodLeft[next], 31.5);
-  assert.ok(Number.isNaN(scene.fodRight[next]));
+  assert.equal(scene.fodRight[current], 31.5);
+  assert.equal(scene.fodRight[next], 31.5);
+  assert.ok(Number.isNaN(scene.fodLeft[next]));
   assert.equal(scene.whispyDirection[current], 2);
   assert.equal(scene.whispyDirection[next], 2);
   assert.equal(scene.stageEventEnds[current] - scene.stageEventStarts[current], 2);

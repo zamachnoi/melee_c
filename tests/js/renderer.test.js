@@ -8,7 +8,7 @@ import {
   gameplayCameraTarget, meleeStageCamera, panCamera, screenToWorld, zoomCameraAt,
 } from '../../web/dist/renderer/camera.js';
 import { isAcceptedFdSection, isStageSection, positionBounds, transformBindPose } from '../../web/dist/renderer/static-pose.js';
-import { evaluateStagePose, skinPositions } from '../../web/dist/animation/pose.js';
+import { evaluateStagePose, skinPositions, stageBoneYOffset } from '../../web/dist/animation/pose.js';
 
 function arrayBuffer(path) {
   const bytes = fs.readFileSync(path);
@@ -41,18 +41,33 @@ test('stage section filter keeps playable platforms and drops skybox domes', () 
   assert.deepEqual(fodAccepted, [2, 3, 4], 'FoD renders platforms and fountain, dropping the background dome');
 });
 
-test('FoD platform pose moves bone 2/3 to the recorded fod height', () => {
-  const fod = parseStage(arrayBuffer('cache/griz.stage'));
-  const section = fod.sections[2];
-  const boneRows = evaluateStagePose(section, new Map([[2, 20 + 1.5], [3, 35 + 1.5]]));
-  const posed = skinPositions(section, boneRows);
+function boneWorldY(section, posed, bone) {
   const ys = [];
   for (let vertex = 0; vertex < section.vertexCount; vertex++) {
-    if (section.boneIndices[vertex * 4] === 2) ys.push(posed[vertex * 3 + 1]);
+    if (section.boneIndices[vertex * 4] === bone) ys.push(posed[vertex * 3 + 1]);
   }
-  assert.ok(ys.length > 0);
-  assert.ok(Math.abs(Math.min(...ys) - 18.5) < 0.1);
-  assert.ok(Math.abs(Math.max(...ys) - 21.5) < 0.1);
+  return ys;
+}
+
+test('FoD platform pose puts mesh tops at the world-space replay height', () => {
+  const fod = parseStage(arrayBuffer('cache/griz.stage'));
+  assert.equal(fod.scale, 0.75);
+  const leftHeight = 16.125;
+  const rightHeight = 22.125;
+  const offsets = (leftBone, rightBone) => new Map([
+    [leftBone, stageBoneYOffset(leftHeight, fod.scale)],
+    [rightBone, stageBoneYOffset(rightHeight, fod.scale)],
+  ]);
+  const check = (section, leftBone, rightBone) => {
+    const posed = skinPositions(section, evaluateStagePose(section, offsets(leftBone, rightBone)));
+    const left = boneWorldY(section, posed, leftBone);
+    const right = boneWorldY(section, posed, rightBone);
+    assert.ok(left.length > 0 && right.length > 0);
+    assert.ok(Math.abs(Math.max(...left) * fod.scale - leftHeight) < 0.01);
+    assert.ok(Math.abs(Math.max(...right) * fod.scale - rightHeight) < 0.01);
+  };
+  check(fod.sections[2], 2, 3);
+  check(fod.sections[3], 1, 2);
 });
 
 test('stage pose evaluation can fill a reused bone-row buffer', () => {

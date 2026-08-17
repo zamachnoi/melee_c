@@ -334,10 +334,17 @@ function acquireStagePoseScratch(boneCount: number): StagePoseScratch {
   return stagePoseScratch;
 }
 
-/** Bind-pose bone rows for a stage section, with per-bone world Y offsets.
-    Fountain of Dreams' two moving platforms live on bones 2/3 of section 2;
-    the recorded fodLeft/fodRight heights are their Y positions, so each frame
-    we translate those bones and re-pack world + skin rows. */
+/** Convert a gameplay/world Y (Slippi FoD height, fighter feet) into a DAT-local
+    bone translation delta. Stage meshes are drawn with `stageScale` (FoD is 0.75),
+    so applying the raw replay height would leave the platforms 25% too low. */
+export function stageBoneYOffset(worldY: number, stageScale: number): number {
+  return stageScale === 0 ? worldY : worldY / stageScale;
+}
+
+/** Bind-pose bone rows for a stage section, with per-bone DAT-local Y offsets.
+    Fountain of Dreams' moving platforms are section 2 bones 2/3 and a second
+    material pass on section 3 bones 1/2; pass `stageBoneYOffset(height, scale)`
+    so the skinned top matches the recorded world height after stageScale. */
 export function evaluateStagePose(
   model: ModelAsset, boneOffsets: ReadonlyMap<number, number>, output?: Float32Array,
 ): Float32Array {
