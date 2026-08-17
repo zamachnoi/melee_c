@@ -63,27 +63,114 @@ function syncEyeFromAngles(camera: CameraState, viewport?: CameraViewport): void
   camera.eyeZ = distance;
 }
 
+const LOOK_ANGLES = { verticalAngle: 0, horizontalAngle: 0 };
+const VIEW_SCRATCH = new Float32Array(16);
+const PROJ_SCRATCH = new Float32Array(16);
+const AXIS_FORWARD = new Float32Array(3);
+const AXIS_RIGHT = new Float32Array(3);
+const AXIS_UP = new Float32Array(3);
+
 function lookAnglesFromEye(
   interestX: number, interestY: number, eyeX: number, eyeY: number, eyeZ: number,
 ): { verticalAngle: number; horizontalAngle: number } {
   const depth = Math.max(1e-6, eyeZ);
-  return {
-    verticalAngle: Math.atan((interestY - eyeY) / depth) / RADIANS,
-    horizontalAngle: Math.atan((interestX - eyeX) / depth) / RADIANS,
-  };
+  LOOK_ANGLES.verticalAngle = Math.atan((interestY - eyeY) / depth) / RADIANS;
+  LOOK_ANGLES.horizontalAngle = Math.atan((interestX - eyeX) / depth) / RADIANS;
+  return LOOK_ANGLES;
+}
+
+function writeNormalized(
+  x: number, y: number, z: number, out: Float32Array | [number, number, number],
+): void {
+  const length = Math.hypot(x, y, z) || 1;
+  out[0] = x / length;
+  out[1] = y / length;
+  out[2] = z / length;
+}
+
+function writeViewAxes(
+  camera: CameraState,
+  right: Float32Array | [number, number, number],
+  up: Float32Array | [number, number, number],
+  forward: Float32Array = AXIS_FORWARD,
+): void {
+  const distance = camera.distance > 0 ? camera.distance : DEFAULT_DISTANCE;
+  const eyeX = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
+    ? camera.eyeX
+    : camera.centerX - distance * Math.tan(camera.horizontalAngle * RADIANS);
+  const eyeY = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
+    ? camera.eyeY
+    : camera.centerY - distance * Math.tan(camera.verticalAngle * RADIANS);
+  const eyeZ = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0 ? camera.eyeZ : distance;
+  writeNormalized(eyeX - camera.centerX, eyeY - camera.centerY, eyeZ, forward);
+  writeNormalized(forward[2], 0, -forward[0], right);
+  up[0] = forward[1] * right[2] - forward[2] * right[1];
+  up[1] = forward[2] * right[0] - forward[0] * right[2];
+  up[2] = forward[0] * right[1] - forward[1] * right[0];
+}
+
+export function cameraViewAxes(
+  camera: CameraState,
+  right: Float32Array | [number, number, number] = [0, 0, 0],
+  up: Float32Array | [number, number, number] = [0, 0, 0],
+): { right: Float32Array | [number, number, number]; up: Float32Array | [number, number, number] } {
+  writeViewAxes(camera, right, up);
+  return { right, up };
+}
+
+/**
+ * HSD_CObjSetupViewingMtx: look from eye WObj at interest WObj with world up.
+ * Camera_8002AF68 feeds those two points from CameraTransformState.
+ */
+export function cameraViewProjection(camera: CameraState, viewport: CameraViewport, out = new Float32Array(16)): Float32Array {
+  const fov = camera.fov > 0 ? camera.fov : DEFAULT_FOV;
+  const distance = camera.distance > 0 ? camera.distance : distanceFromZoom(viewport, camera.zoom, fov);
+  const eyeX = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
+    ? camera.eyeX
+    : camera.centerX - distance * Math.tan(camera.horizontalAngle * RADIANS);
+  const eyeY = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
+    ? camera.eyeY
+    : camera.centerY - distance * Math.tan(camera.verticalAngle * RADIANS);
+  const eyeZ = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0 ? camera.eyeZ : distance;
+  writeViewAxes(camera, AXIS_RIGHT, AXIS_UP, AXIS_FORWARD);
+  const xx = AXIS_RIGHT[0], xy = AXIS_RIGHT[1], xz = AXIS_RIGHT[2];
+  const yx = AXIS_UP[0], yy = AXIS_UP[1], yz = AXIS_UP[2];
+  const zx = AXIS_FORWARD[0], zy = AXIS_FORWARD[1], zz = AXIS_FORWARD[2];
+  VIEW_SCRATCH[0] = xx; VIEW_SCRATCH[1] = yx; VIEW_SCRATCH[2] = zx; VIEW_SCRATCH[3] = 0;
+  VIEW_SCRATCH[4] = xy; VIEW_SCRATCH[5] = yy; VIEW_SCRATCH[6] = zy; VIEW_SCRATCH[7] = 0;
+  VIEW_SCRATCH[8] = xz; VIEW_SCRATCH[9] = yz; VIEW_SCRATCH[10] = zz; VIEW_SCRATCH[11] = 0;
+  VIEW_SCRATCH[12] = -(xx * eyeX + xy * eyeY + xz * eyeZ);
+  VIEW_SCRATCH[13] = -(yx * eyeX + yy * eyeY + yz * eyeZ);
+  VIEW_SCRATCH[14] = -(zx * eyeX + zy * eyeY + zz * eyeZ);
+  VIEW_SCRATCH[15] = 1;
+  const aspect = viewport.width / Math.max(1, viewport.height);
+  const near = Math.max(0.1, distance * 0.05);
+  const far = Math.max(distance + 800, 16384);
+  const f = 1 / Math.tan((fov * RADIANS) * 0.5);
+  const nf = 1 / (near - far);
+  PROJ_SCRATCH[0] = f / aspect; PROJ_SCRATCH[1] = 0; PROJ_SCRATCH[2] = 0; PROJ_SCRATCH[3] = 0;
+  PROJ_SCRATCH[4] = 0; PROJ_SCRATCH[5] = f; PROJ_SCRATCH[6] = 0; PROJ_SCRATCH[7] = 0;
+  PROJ_SCRATCH[8] = 0; PROJ_SCRATCH[9] = 0; PROJ_SCRATCH[10] = (far + near) * nf; PROJ_SCRATCH[11] = -1;
+  PROJ_SCRATCH[12] = 0; PROJ_SCRATCH[13] = 0; PROJ_SCRATCH[14] = 2 * far * near * nf; PROJ_SCRATCH[15] = 0;
+  for (let column = 0; column < 4; column++) {
+    for (let row = 0; row < 4; row++) {
+      let value = 0;
+      for (let k = 0; k < 4; k++) value += PROJ_SCRATCH[k * 4 + row] * VIEW_SCRATCH[column * 4 + k];
+      out[column * 4 + row] = value;
+    }
+  }
+  return out;
 }
 
 export function panCamera(camera: CameraState, dx: number, dy: number): CameraState {
   const shiftX = -dx / camera.zoom;
   const shiftY = dy / camera.zoom;
-  return {
-    ...camera,
-    mode: 'free',
-    centerX: camera.centerX + shiftX,
-    centerY: camera.centerY + shiftY,
-    eyeX: camera.eyeX + shiftX,
-    eyeY: camera.eyeY + shiftY,
-  };
+  camera.mode = 'free';
+  camera.centerX += shiftX;
+  camera.centerY += shiftY;
+  camera.eyeX += shiftX;
+  camera.eyeY += shiftY;
+  return camera;
 }
 
 export function screenToWorld(
@@ -106,17 +193,15 @@ export function zoomCameraAt(
   const scale = distance / Math.max(1, camera.eyeZ || camera.distance);
   const centerX = anchor.x - (x - viewport.width / 2) / zoom;
   const centerY = anchor.y + (y - viewport.height / 2) / zoom;
-  return {
-    ...camera,
-    mode: 'free',
-    zoom,
-    distance,
-    centerX,
-    centerY,
-    eyeX: centerX + (camera.eyeX - camera.centerX) * scale,
-    eyeY: centerY + (camera.eyeY - camera.centerY) * scale,
-    eyeZ: distance,
-  };
+  camera.mode = 'free';
+  camera.zoom = zoom;
+  camera.distance = distance;
+  camera.eyeX = centerX + (camera.eyeX - camera.centerX) * scale;
+  camera.eyeY = centerY + (camera.eyeY - camera.centerY) * scale;
+  camera.centerX = centerX;
+  camera.centerY = centerY;
+  camera.eyeZ = distance;
+  return camera;
 }
 
 export function setCamera(
@@ -208,7 +293,13 @@ const SUBJECT_WEIGHT = [0, 1.5, 1.32, 1.16, 1];
  * Camera_8002958C subject box + Camera_80029CF8 interest/eye solve.
  * HSD_CObj then looks from target_position at target_interest (Camera_8002AF68).
  */
-export function gameplayCameraTarget(subjects: readonly CameraSubject[]): GameplayCameraTarget | null {
+export function gameplayCameraTarget(
+  subjects: readonly CameraSubject[],
+  out: GameplayCameraTarget = {
+    centerX: 0, centerY: 0, eyeX: 0, eyeY: 0, eyeZ: 0,
+    distance: 0, fov: 0, verticalAngle: 0, horizontalAngle: 0,
+  },
+): GameplayCameraTarget | null {
   if (!subjects.length) return null;
   const track = (SUBJECT_WEIGHT[Math.min(subjects.length, 4)] ?? 1) * 1.5;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -250,10 +341,16 @@ export function gameplayCameraTarget(subjects: readonly CameraSubject[]): Gamepl
   const eyeY = interestY - yOff;
   const eyeZ = distance;
   const angles = lookAnglesFromEye(interestX, interestY, eyeX, eyeY, eyeZ);
-  return {
-    centerX: interestX, centerY: interestY, eyeX, eyeY, eyeZ, distance,
-    fov: GAMEPLAY_FOV, ...angles,
-  };
+  out.centerX = interestX;
+  out.centerY = interestY;
+  out.eyeX = eyeX;
+  out.eyeY = eyeY;
+  out.eyeZ = eyeZ;
+  out.distance = distance;
+  out.fov = GAMEPLAY_FOV;
+  out.verticalAngle = angles.verticalAngle;
+  out.horizontalAngle = angles.horizontalAngle;
+  return out;
 }
 
 export function applyGameplayCamera(
@@ -292,14 +389,25 @@ export function blendGameplayCamera(
 
 export function gameplayLookTarget(
   interestX: number, interestY: number, distance: number, solved: GameplayCameraTarget,
+  out: GameplayCameraTarget = {
+    centerX: 0, centerY: 0, eyeX: 0, eyeY: 0, eyeZ: 0,
+    distance: 0, fov: 0, verticalAngle: 0, horizontalAngle: 0,
+  },
 ): GameplayCameraTarget {
   const eyeX = interestX + (solved.eyeX - solved.centerX);
   const eyeY = interestY + (solved.eyeY - solved.centerY);
   const eyeZ = distance;
-  return {
-    centerX: interestX, centerY: interestY, eyeX, eyeY, eyeZ, distance: eyeZ,
-    fov: solved.fov, ...lookAnglesFromEye(interestX, interestY, eyeX, eyeY, eyeZ),
-  };
+  const angles = lookAnglesFromEye(interestX, interestY, eyeX, eyeY, eyeZ);
+  out.centerX = interestX;
+  out.centerY = interestY;
+  out.eyeX = eyeX;
+  out.eyeY = eyeY;
+  out.eyeZ = eyeZ;
+  out.distance = eyeZ;
+  out.fov = solved.fov;
+  out.verticalAngle = angles.verticalAngle;
+  out.horizontalAngle = angles.horizontalAngle;
+  return out;
 }
 
 /** Keep C's smoothed interest, but aim with Camera_80029CF8's eye offset. */
@@ -312,79 +420,6 @@ export function applySmoothedGameplayCamera(
 
 export function gameplayDistanceFromTimelineZoom(zoom: number): number {
   return 720 / (2 * Math.max(0.25, zoom) * Math.tan((GAMEPLAY_FOV * 0.5) * RADIANS));
-}
-
-function normalize(x: number, y: number, z: number): [number, number, number] {
-  const length = Math.hypot(x, y, z) || 1;
-  return [x / length, y / length, z / length];
-}
-
-export function cameraViewAxes(camera: CameraState): {
-  right: [number, number, number];
-  up: [number, number, number];
-} {
-  const distance = camera.distance > 0 ? camera.distance : DEFAULT_DISTANCE;
-  const eyeX = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
-    ? camera.eyeX
-    : camera.centerX - distance * Math.tan(camera.horizontalAngle * RADIANS);
-  const eyeY = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
-    ? camera.eyeY
-    : camera.centerY - distance * Math.tan(camera.verticalAngle * RADIANS);
-  const eyeZ = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0 ? camera.eyeZ : distance;
-  const [zx, zy, zz] = normalize(eyeX - camera.centerX, eyeY - camera.centerY, eyeZ);
-  const right = normalize(zz, 0, -zx);
-  const up: [number, number, number] = [
-    zy * right[2] - zz * right[1],
-    zz * right[0] - zx * right[2],
-    zx * right[1] - zy * right[0],
-  ];
-  return { right, up };
-}
-
-/**
- * HSD_CObjSetupViewingMtx: look from eye WObj at interest WObj with world up.
- * Camera_8002AF68 feeds those two points from CameraTransformState.
- */
-export function cameraViewProjection(camera: CameraState, viewport: CameraViewport, out = new Float32Array(16)): Float32Array {
-  const fov = camera.fov > 0 ? camera.fov : DEFAULT_FOV;
-  const distance = camera.distance > 0 ? camera.distance : distanceFromZoom(viewport, camera.zoom, fov);
-  const eyeX = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
-    ? camera.eyeX
-    : camera.centerX - distance * Math.tan(camera.horizontalAngle * RADIANS);
-  const eyeY = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0
-    ? camera.eyeY
-    : camera.centerY - distance * Math.tan(camera.verticalAngle * RADIANS);
-  const eyeZ = Number.isFinite(camera.eyeZ) && camera.eyeZ > 0 ? camera.eyeZ : distance;
-  const { right: [xx, xy, xz], up: [yx, yy, yz] } = cameraViewAxes(camera);
-  const [zx, zy, zz] = normalize(eyeX - camera.centerX, eyeY - camera.centerY, eyeZ);
-  const view = new Float32Array([
-    xx, yx, zx, 0,
-    xy, yy, zy, 0,
-    xz, yz, zz, 0,
-    -(xx * eyeX + xy * eyeY + xz * eyeZ),
-    -(yx * eyeX + yy * eyeY + yz * eyeZ),
-    -(zx * eyeX + zy * eyeY + zz * eyeZ),
-    1,
-  ]);
-  const aspect = viewport.width / Math.max(1, viewport.height);
-  const near = Math.max(0.1, distance * 0.05);
-  const far = Math.max(distance + 800, 16384);
-  const f = 1 / Math.tan((fov * RADIANS) * 0.5);
-  const nf = 1 / (near - far);
-  const proj = new Float32Array([
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0,
-  ]);
-  for (let column = 0; column < 4; column++) {
-    for (let row = 0; row < 4; row++) {
-      let value = 0;
-      for (let k = 0; k < 4; k++) value += proj[k * 4 + row] * view[column * 4 + k];
-      out[column * 4 + row] = value;
-    }
-  }
-  return out;
 }
 
 /** Profile projection convention shared with render_pose_profile in C. */

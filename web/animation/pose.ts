@@ -305,6 +305,35 @@ export function skinPositions(model: ModelAsset, boneRows: Float32Array, output 
 
 export const STAGE_BONE_FLOATS = BONE_TEXTURE_FLOATS;
 
+interface StagePoseScratch {
+  boneCount: number;
+  local: Float32Array;
+  world: Float32Array;
+  skin: Float32Array;
+  scale: Float32Array;
+  rotation: Float32Array;
+  translation: Float32Array;
+  state: Uint8Array;
+}
+
+let stagePoseScratch: StagePoseScratch | null = null;
+
+function acquireStagePoseScratch(boneCount: number): StagePoseScratch {
+  const current = stagePoseScratch;
+  if (current && current.boneCount >= boneCount) return current;
+  stagePoseScratch = {
+    boneCount,
+    local: new Float32Array(boneCount * MATRIX_FLOATS),
+    world: new Float32Array(boneCount * MATRIX_FLOATS),
+    skin: new Float32Array(MATRIX_FLOATS),
+    scale: new Float32Array(boneCount * 3),
+    rotation: new Float32Array(boneCount * 3),
+    translation: new Float32Array(boneCount * 3),
+    state: new Uint8Array(boneCount),
+  };
+  return stagePoseScratch;
+}
+
 /** Bind-pose bone rows for a stage section, with per-bone world Y offsets.
     Fountain of Dreams' two moving platforms live on bones 2/3 of section 2;
     the recorded fodLeft/fodRight heights are their Y positions, so each frame
@@ -313,11 +342,9 @@ export function evaluateStagePose(
   model: ModelAsset, boneOffsets: ReadonlyMap<number, number>, output?: Float32Array,
 ): Float32Array {
   const rows = output ?? new Float32Array(model.boneCount * BONE_TEXTURE_FLOATS);
-  const local = new Float32Array(model.boneCount * MATRIX_FLOATS);
+  const scratch = acquireStagePoseScratch(model.boneCount);
+  const { local, world, skin, scale, rotation, translation, state } = scratch;
   local.set(model.boneBase);
-  const scale = new Float32Array(model.boneCount * 3);
-  const rotation = new Float32Array(model.boneCount * 3);
-  const translation = new Float32Array(model.boneCount * 3);
   for (let bone = 0; bone < model.boneCount; bone++) decomposeBase(model, bone, scale, rotation, translation);
   for (const [bone, offset] of boneOffsets) {
     if (bone < 0 || bone >= model.boneCount) continue;
@@ -328,9 +355,7 @@ export function evaluateStagePose(
       translation[base], translation[base + 1] + offset, translation[base + 2],
       local, o);
   }
-  const world = new Float32Array(model.boneCount * MATRIX_FLOATS);
-  const skin = new Float32Array(MATRIX_FLOATS);
-  const state = new Uint8Array(model.boneCount);
+  state.fill(0);
   const evaluateWorldBone = (bone: number): void => {
     if (state[bone] === 2) return;
     if (state[bone] === 1) return;

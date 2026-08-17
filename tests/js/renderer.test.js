@@ -55,6 +55,18 @@ test('FoD platform pose moves bone 2/3 to the recorded fod height', () => {
   assert.ok(Math.abs(Math.max(...ys) - 21.5) < 0.1);
 });
 
+test('stage pose evaluation can fill a reused bone-row buffer', () => {
+  const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
+  const section = stage.sections.find(value => value.boneCount > 1) ?? stage.sections[0];
+  const rows = evaluateStagePose(section, new Map());
+  const again = evaluateStagePose(section, new Map([[0, 4]]), rows);
+  assert.equal(again, rows);
+  const reset = evaluateStagePose(section, new Map(), rows);
+  assert.equal(reset, rows);
+  const bind = evaluateStagePose(section, new Map());
+  for (let i = 0; i < bind.length; i++) assert.ok(Math.abs(reset[i] - bind[i]) < 1e-5);
+});
+
 test('melee camera uses the authored FD stage height, angle, and zoom', () => {
   const stage = parseStage(arrayBuffer('fixtures/cache/fd.stage'));
   const viewport = { width: 960, height: 720 };
@@ -147,6 +159,20 @@ test('gameplay camera interpolates interest slower than the eye', () => {
   assert.equal(snapped.eyeX, target.eyeX);
 });
 
+test('gameplay camera writes into a caller-supplied target without allocating another', () => {
+  const out = {
+    centerX: 0, centerY: 0, eyeX: 0, eyeY: 0, eyeZ: 0,
+    distance: 0, fov: 0, verticalAngle: 0, horizontalAngle: 0,
+  };
+  const first = gameplayCameraTarget([{ x: 40, y: 10, facing: 1 }]);
+  const reused = gameplayCameraTarget([{ x: 40, y: 10, facing: 1 }], out);
+  assert.equal(reused, out);
+  assert.ok(first && reused);
+  assert.equal(reused.centerX, first.centerX);
+  assert.equal(reused.eyeY, first.eyeY);
+  assert.equal(reused.fov, 38);
+});
+
 test('camera view axes stay orthonormal with a horizontal right vector', () => {
   const camera = createCameraState();
   const { right, up } = cameraViewAxes(camera);
@@ -155,17 +181,30 @@ test('camera view axes stay orthonormal with a horizontal right vector', () => {
   assert.ok(Math.abs(right[0] * up[0] + right[1] * up[1] + right[2] * up[2]) < 1e-6);
 });
 
+test('camera view projection can fill a reused matrix buffer', () => {
+  const camera = createCameraState();
+  const viewport = { width: 960, height: 720 };
+  const first = cameraViewProjection(camera, viewport);
+  const reused = new Float32Array(16);
+  const second = cameraViewProjection(camera, viewport, reused);
+  assert.equal(second, reused);
+  assert.deepEqual([...reused], [...first]);
+  cameraViewProjection(camera, viewport, reused);
+  assert.deepEqual([...reused], [...first]);
+});
+
 test('free camera pan and pointer-centered zoom preserve coordinates', () => {
   const camera = { ...createCameraState(), centerX: 4, centerY: 9, zoom: 5 };
-  const panned = panCamera(camera, 25, -10);
+  const panned = panCamera({ ...camera }, 25, -10);
   assert.equal(panned.mode, 'free');
   assert.equal(panned.centerX, -1);
   assert.equal(panned.centerY, 7);
   const viewport = { width: 960, height: 720 };
   const pointer = { x: 630, y: 270 };
   const before = screenToWorld(camera, viewport, pointer.x, pointer.y);
-  const zoomed = zoomCameraAt(camera, viewport, pointer.x, pointer.y, 1.7);
+  const zoomed = zoomCameraAt({ ...camera }, viewport, pointer.x, pointer.y, 1.7);
   const after = screenToWorld(zoomed, viewport, pointer.x, pointer.y);
   assert.ok(Math.abs(before.x - after.x) < 1e-9);
   assert.ok(Math.abs(before.y - after.y) < 1e-9);
+  assert.equal(panCamera(camera, 0, 0), camera);
 });

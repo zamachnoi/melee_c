@@ -11,6 +11,7 @@ import {
   gameplayLookTarget, meleeStageCamera,
   panCamera, zoomCameraAt,
   type CameraMode, type CameraState, type CameraSubject, type CameraViewport,
+  type GameplayCameraTarget,
 } from './renderer/camera.js';
 import { isStageSection } from './renderer/static-pose.js';
 import {
@@ -50,7 +51,14 @@ interface FighterRuntime {
   source: AnimatedFighter | null;
   warning: string | null;
 }
-interface HudEntry { root: HTMLDivElement; title: HTMLSpanElement; state: HTMLSpanElement }
+interface HudEntry {
+  root: HTMLDivElement;
+  title: HTMLSpanElement;
+  state: HTMLSpanElement;
+  lastText: string;
+  lastAbsent: boolean;
+  lastUnavailable: boolean;
+}
 type AutomaticCameraMode = Extract<CameraMode, 'melee' | 'fit' | 'follow'>;
 
 function element<T extends HTMLElement>(id: string): T {
@@ -133,11 +141,22 @@ export async function bootWebGL2(): Promise<void> {
   let animationSamples = 0, animationTotalMs = 0, animationMaxMs = 0;
   let frameSamples = 0, frameTotalMs = 0, frameMaxMs = 0;
   let presentedFrames = 0, droppedPresentations = 0, consecutivePresented = 0, longestConsecutive = 0;
-  let animationFrameId = 0, lastDiagnosticsAt = 0;
+  let animationFrameId = 0, lastDiagnosticsAt = 0, lastChromeAt = 0;
   let currentItemCount = 0;
   let assetWarnings: string[] = [];
   let debugVisible = false;
   const injectedAssetFailure = new URLSearchParams(location.search).get('failAsset');
+  const cameraSubjectList: CameraSubject[] = [];
+  const cameraSubjectPool: CameraSubject[] = Array.from({ length: 8 }, () => ({ x: 0, y: 0, facing: 1 }));
+  const solvedCamera: GameplayCameraTarget = {
+    centerX: 0, centerY: 0, eyeX: 0, eyeY: 0, eyeZ: 0,
+    distance: 0, fov: 0, verticalAngle: 0, horizontalAngle: 0,
+  };
+  const lookCamera: GameplayCameraTarget = {
+    centerX: 0, centerY: 0, eyeX: 0, eyeY: 0, eyeZ: 0,
+    distance: 0, fov: 0, verticalAngle: 0, horizontalAngle: 0,
+  };
+  const fodOffsets = new Map<number, number>();
 
   const trackedFetch = async (url: string, init?: RequestInit): Promise<Response> => {
     requestCount++;
@@ -238,19 +257,26 @@ export async function bootWebGL2(): Promise<void> {
   const selectedSlot = (): number => followSlot;
 
   const cameraSubjects = (index: number, slotIndex?: number): CameraSubject[] => {
-    if (!timeline) return [];
-    const subjects: CameraSubject[] = [];
-    const slots = slotIndex === undefined ? timeline.slots : [timeline.slots[slotIndex]];
-    for (const slot of slots) {
+    cameraSubjectList.length = 0;
+    if (!timeline) return cameraSubjectList;
+    for (let i = 0; i < timeline.slots.length; i++) {
+      if (slotIndex !== undefined && i !== slotIndex) continue;
+      const slot = timeline.slots[i];
       if (!slot?.active || !slot.presence[index] || !slot.stocks[index]) continue;
       if (slotIndex === undefined && slot.follower) continue;
       const x = slot.x[index], y = slot.y[index];
       if (Math.abs(x) > 300 || y < -120 || y > 240) continue;
-      subjects.push({ x, y, facing: slot.facing[index] });
+      const subject = cameraSubjectPool[cameraSubjectList.length] ?? { x: 0, y: 0, facing: 1 };
+      subject.x = x;
+      subject.y = y;
+      subject.facing = slot.facing[index];
+      cameraSubjectList.push(subject);
     }
-    return subjects;
+    return cameraSubjectList;
   };
 
+  const blendRates = { interest: 1, eye: 1, steps: 1 };
+  const SNAP_BLEND = { interest: 1, eye: 1, steps: 1 };
   const cameraBlendRates = (index: number, interestAlreadySmoothed: boolean): { interest: number; eye: number; steps: number } => {
     const previous = lastCameraIndex;
     const jumped = previous === null || lastBlendMode !== preferredCameraMode
@@ -258,17 +284,20 @@ export async function bootWebGL2(): Promise<void> {
     const steps = jumped ? 1 : Math.max(1, Math.abs(index - previous) || 1);
     lastCameraIndex = index;
     lastBlendMode = preferredCameraMode;
-    if (jumped) return { interest: 1, eye: 1, steps: 1 };
-    return {
-      interest: interestAlreadySmoothed ? 1 : CAMERA_INTEREST_RATE,
-      eye: CAMERA_EYE_RATE,
-      steps,
-    };
+    if (jumped) {
+      blendRates.interest = 1;
+      blendRates.eye = 1;
+      blendRates.steps = 1;
+      return blendRates;
+    }
+    blendRates.interest = interestAlreadySmoothed ? 1 : CAMERA_INTEREST_RATE;
+    blendRates.eye = CAMERA_EYE_RATE;
+    blendRates.steps = steps;
+    return blendRates;
   };
 
   const applyOriginalCamera = (index: number, rates?: { interest: number; eye: number; steps: number }): void => {
-    const fallback = meleeStageCamera(viewportSize, stageCameraSource);
-    const solved = gameplayCameraTarget(cameraSubjects(index));
+    const solved = gameplayCameraTarget(cameraSubjects(index), solvedCamera);
     const blend = rates ?? cameraBlendRates(index, true);
     if (timeline?.camera && solved) {
       blendGameplayCamera(
@@ -276,14 +305,14 @@ export async function bootWebGL2(): Promise<void> {
         gameplayLookTarget(
           timeline.camera.x[index], timeline.camera.y[index],
           gameplayDistanceFromTimelineZoom(timeline.camera.zoom[index]),
-          solved,
+          solved, lookCamera,
         ),
         'melee', blend,
       );
     } else if (solved) {
       blendGameplayCamera(camera, viewportSize, solved, 'melee', blend);
     } else {
-      Object.assign(camera, fallback);
+      Object.assign(camera, meleeStageCamera(viewportSize, stageCameraSource));
     }
     camera.mode = 'melee';
     camera.targetPort = null;
@@ -307,11 +336,11 @@ export async function bootWebGL2(): Promise<void> {
   const applyFollowCamera = (index: number): void => {
     if (!timeline) return;
     const slot = timeline.slots[followSlot];
-    const solved = gameplayCameraTarget(cameraSubjects(index, followSlot));
+    const solved = gameplayCameraTarget(cameraSubjects(index, followSlot), solvedCamera);
     if (solved && slot?.presence[index]) {
       blendGameplayCamera(camera, viewportSize, solved, 'follow', cameraBlendRates(index, false));
       camera.targetPort = slot.port;
-    } else applyOriginalCamera(index, { interest: 1, eye: 1, steps: 1 });
+    } else applyOriginalCamera(index, SNAP_BLEND);
   };
 
   const applyAutomaticCamera = (index: number): void => {
@@ -373,12 +402,12 @@ export async function bootWebGL2(): Promise<void> {
     lastFodLeft = fodLeft;
     lastFodRight = fodRight;
     if (!changed) return;
-    const offsets = new Map<number, number>();
+    fodOffsets.clear();
     /* The platform meshes sit at y=-1.5 in bind pose; the replay height is
        their absolute Y. */
-    if (Number.isFinite(fodLeft)) offsets.set(FOD_PLATFORM_LEFT_BONE, fodLeft + 1.5);
-    if (Number.isFinite(fodRight)) offsets.set(FOD_PLATFORM_RIGHT_BONE, fodRight + 1.5);
-    evaluateStagePose(fodStageEntry.model, offsets, fodStageEntry.boneRows);
+    if (Number.isFinite(fodLeft)) fodOffsets.set(FOD_PLATFORM_LEFT_BONE, fodLeft + 1.5);
+    if (Number.isFinite(fodRight)) fodOffsets.set(FOD_PLATFORM_RIGHT_BONE, fodRight + 1.5);
+    evaluateStagePose(fodStageEntry.model, fodOffsets, fodStageEntry.boneRows);
     fodStageEntry.poseVersion += 1;
   };
 
@@ -397,6 +426,20 @@ export async function bootWebGL2(): Promise<void> {
     }
     if (assetWarnings.length) text += `\nwarnings: ${assetWarnings.join(' | ')}`;
     debugOverlay.textContent = text;
+  };
+
+  const updateFrameLabel = (): void => {
+    if (!timeline) return;
+    const selected = runtimeBySlot[selectedSlot()];
+    const pose = selected?.pose;
+    const resolvedAction = pose?.resolvedAction ?? null;
+    const action = !selected?.source ? 'asset unavailable'
+      : resolvedAction === null ? (selected.animated ? 'bind' : 'bind-only')
+        : (selected.actionLabels[resolvedAction] ?? 'unknown');
+    const mapping = pose?.fallback ? ` · ${pose.requestedAction}→${resolvedAction ?? 'bind'}` : '';
+    const text = `frame ${frame} · ${action}${mapping}`;
+    if (frameLabel.textContent !== text) frameLabel.textContent = text;
+    if (frameSlider.valueAsNumber !== frame) frameSlider.value = String(frame);
   };
 
   const updateFrame = (nextFrame: number, updateLabel = true): void => {
@@ -425,11 +468,23 @@ export async function bootWebGL2(): Promise<void> {
       }
       const hudEntry = hudEntries[runtimeIndex];
       if (hudEntry) {
-        hudEntry.root.classList.toggle('absent', !slot.presence[index]);
-        hudEntry.root.classList.toggle('unavailable', !fighter);
-        hudEntry.state.textContent = fighter
+        const absent = !slot.presence[index];
+        const unavailable = !fighter;
+        if (hudEntry.lastAbsent !== absent) {
+          hudEntry.root.classList.toggle('absent', absent);
+          hudEntry.lastAbsent = absent;
+        }
+        if (hudEntry.lastUnavailable !== unavailable) {
+          hudEntry.root.classList.toggle('unavailable', unavailable);
+          hudEntry.lastUnavailable = unavailable;
+        }
+        const text = fighter
           ? `${Math.round(slot.percent[index])}% · ×${slot.stocks[index]}`
           : 'asset unavailable';
+        if (hudEntry.lastText !== text) {
+          hudEntry.state.textContent = text;
+          hudEntry.lastText = text;
+        }
       }
     }
     const animationElapsed = performance.now() - animationStarted;
@@ -451,17 +506,7 @@ export async function bootWebGL2(): Promise<void> {
     frameSamples++;
     frameTotalMs += workElapsed;
     frameMaxMs = Math.max(frameMaxMs, workElapsed);
-    frameSlider.value = String(frame);
-    if (updateLabel) {
-      const selected = runtimeBySlot[selectedSlot()];
-      const pose = selected?.pose;
-      const resolvedAction = pose?.resolvedAction ?? null;
-      const action = !selected?.source ? 'asset unavailable'
-        : resolvedAction === null ? (selected.animated ? 'bind' : 'bind-only')
-          : (selected.actionLabels[resolvedAction] ?? 'unknown');
-      const mapping = pose?.fallback ? ` · ${pose.requestedAction}→${resolvedAction ?? 'bind'}` : '';
-      frameLabel.textContent = `frame ${frame} · ${action}${mapping}`;
-    }
+    if (updateLabel) updateFrameLabel();
     updateDebug(index);
   };
 
@@ -483,11 +528,12 @@ export async function bootWebGL2(): Promise<void> {
         consecutivePresented = 0;
       }
       presentedFrames++;
-      updateFrame(snapshot.frame);
+      updateFrame(snapshot.frame, false);
     }
+    if (now - lastChromeAt >= 100) { updateFrameLabel(); lastChromeAt = now; }
     if (now - lastDiagnosticsAt >= 250) { updateDiagnostics(); lastDiagnosticsAt = now; }
     if (snapshot.playing) animationFrameId = requestAnimationFrame(playbackTick);
-    else { animationFrameId = 0; setPlayState(false); updateDiagnostics(); }
+    else { animationFrameId = 0; setPlayState(false); updateFrameLabel(); updateDiagnostics(); }
   };
 
   const stopPlayback = (now = performance.now()): void => {
@@ -503,6 +549,7 @@ export async function bootWebGL2(): Promise<void> {
     if (clock.playing) {
       const snapshot = clock.pause(now);
       if (snapshot.frame !== frame) updateFrame(snapshot.frame);
+      else updateFrameLabel();
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
       animationFrameId = 0;
       setPlayState(false);
@@ -549,7 +596,7 @@ export async function bootWebGL2(): Promise<void> {
   canvas.addEventListener('pointermove', event => {
     if (!dragging) return;
     camera = panCamera(camera, event.clientX - lastX, event.clientY - lastY);
-    lastX = event.clientX; lastY = event.clientY; cameraMoves++; renderCurrent(); updateDiagnostics();
+    lastX = event.clientX; lastY = event.clientY; cameraMoves++; renderCurrent();
   });
   const stopDragging = (): void => { dragging = false; };
   canvas.addEventListener('pointerup', stopDragging);
@@ -559,7 +606,7 @@ export async function bootWebGL2(): Promise<void> {
     const rect = canvas.getBoundingClientRect();
     camera = zoomCameraAt(camera, viewportSize, event.clientX - rect.left, event.clientY - rect.top,
       Math.exp(-event.deltaY * 0.001));
-    cameraMoves++; renderCurrent(); updateDiagnostics();
+    cameraMoves++; renderCurrent();
   }, { passive: false });
 
   const reset = (): void => {
@@ -616,7 +663,9 @@ export async function bootWebGL2(): Promise<void> {
       const player = timeline!.players.find(value => value.port === slot.port);
       title.textContent = `${player?.name || `P${slot.port + 1}`}${slot.follower ? ' · Nana' : ''}`;
       root.append(title, state);
-      return { root, title, state };
+      return {
+        root, title, state, lastText: '', lastAbsent: false, lastUnavailable: false,
+      };
     });
     hud.replaceChildren(...hudEntries.map(entry => entry.root));
   };

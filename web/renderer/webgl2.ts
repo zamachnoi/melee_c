@@ -1,7 +1,8 @@
 import type { ModelAsset } from '../assets/model.js';
 import type { TimelineItem } from '../replay/timeline.js';
-import type { CameraState } from './camera.js';
-import { cameraViewAxes, cameraViewProjection } from './camera.js';
+import {
+  cameraViewAxes, cameraViewProjection, createCameraState, type CameraState,
+} from './camera.js';
 import {
   createHexPrism, createUnitCylinder, createUvSphere, EffectKind,
   FALCO_LASER_COLOR, FIRE_COLOR, FIRE_RADIUS, fitEffectScale, FOX_LASER_COLOR,
@@ -431,7 +432,8 @@ export class WebGL2Renderer implements Renderer {
     stageState: { fodLeft: Number.NaN, fodRight: Number.NaN, whispyDirection: -1, stadiumEvent: -1, stadiumType: -1 },
   };
   private size: RenderSize = { width: 960, height: 720, devicePixelRatio: 1 };
-  private lastCamera: CameraState | null = null;
+  private readonly lastCamera: CameraState = createCameraState();
+  private hasLastCamera = false;
   private readonly viewProjection = new Float32Array(16);
   private readonly cameraRight = new Float32Array([1, 0, 0]);
   private readonly cameraUp = new Float32Array([0, 1, 0]);
@@ -446,7 +448,7 @@ export class WebGL2Renderer implements Renderer {
     this.status = status;
     const gl = canvas.getContext('webgl2', {
       alpha: false, antialias: false, depth: true, premultipliedAlpha: false,
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false, powerPreference: 'high-performance',
     });
     if (!gl) throw new Error('WebGL2 is unavailable. Open /?renderer=software for the C viewer.');
     this.gl = gl;
@@ -466,7 +468,7 @@ export class WebGL2Renderer implements Renderer {
       try {
         this.initialize();
         this.setScene(this.source);
-        if (this.lastCamera) this.draw(this.lastCamera);
+        if (this.hasLastCamera) this.draw(this.lastCamera);
         this.status('WebGL2 context restored');
       } catch (error) {
         this.status(error instanceof Error ? error.message : String(error));
@@ -577,7 +579,6 @@ export class WebGL2Renderer implements Renderer {
       this.canvas.width = pixelWidth;
       this.canvas.height = pixelHeight;
     }
-    if (this.lastCamera) this.draw(this.lastCamera);
   }
 
   setScene(source: WebGLSceneSource): void {
@@ -609,12 +610,11 @@ export class WebGL2Renderer implements Renderer {
   }
 
   draw(camera: CameraState): void {
-    this.lastCamera = { ...camera };
+    Object.assign(this.lastCamera, camera);
+    this.hasLastCamera = true;
     if (this.disposed || this.lost || !this.programs) return;
     cameraViewProjection(camera, { width: this.size.width, height: this.size.height }, this.viewProjection);
-    const axes = cameraViewAxes(camera);
-    this.cameraRight.set(axes.right);
-    this.cameraUp.set(axes.up);
+    cameraViewAxes(camera, this.cameraRight, this.cameraUp);
     const gl = this.gl;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.disable(gl.DEPTH_TEST);
@@ -633,10 +633,10 @@ export class WebGL2Renderer implements Renderer {
     for (const mesh of this.stageMeshes) {
       this.drawMesh(mesh, camera, false, 0, 0, 1, this.source.stageScale);
     }
-    const animatedStages = this.source.stageAnimated ?? [];
+    const animatedStages = this.source.stageAnimated;
     for (let index = 0; index < this.stageAnimatedMeshes.length; index++) {
       const mesh = this.stageAnimatedMeshes[index];
-      const entry = animatedStages[index];
+      const entry = animatedStages?.[index];
       if (!entry) continue;
       if (mesh.uploadedPoseVersion !== entry.poseVersion) {
         this.uploadBoneRows(mesh, entry.boneRows);
@@ -957,7 +957,7 @@ export class WebGL2Renderer implements Renderer {
     dirX: number, dirY: number,
     extra?: { ray?: boolean; viewBillboard?: boolean; mirrorMask?: boolean; tint?: readonly [number, number, number, number] },
   ): void {
-    if (!this.lastCamera) return;
+    if (!this.hasLastCamera) return;
     this.drawMesh(mesh, this.lastCamera, false, originX, originY, 1, scale, {
       billboard: !extra?.viewBillboard, ray: extra?.ray, viewBillboard: extra?.viewBillboard,
       mirrorMask: extra?.mirrorMask, dirX, dirY, tint: extra?.tint,
