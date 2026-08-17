@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && esbuild web/main.ts --bundle --format=iife --platform=browser --target=safari15 --outfile=web/dist/main.js",
+    "build": "tsc -p tsconfig.json && npm run build:web",
+    "build:web": "esbuild web/main.ts --bundle --format=iife --platform=browser --target=safari15 --outfile=web/dist/main.js",
     "test": "npm run build && node --test tests/js/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

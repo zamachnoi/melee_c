@@ -6,32 +6,32 @@
 # Storage mount at /data/replays so uploads, game.iso, and cache survive
 # rebuilds. The VOLUME line below is only a hint for local `docker run`.
 #
-# Coolify may inject per-deploy --build-arg values that bust layer cache.
-# Independent stages + cache mounts keep apk/npm from re-downloading.
-# In Coolify → Advanced: keep "Disable Build Cache" off; turn off
-# "Include Source Commit in Build" and "Inject Build Args to Dockerfile".
+# Coolify injects stable ARGs after each FROM (URL/FQDN/branch/UUID), so
+# layer cache should reuse apk/npm/ccache across commits. Per-commit image
+# tags (uuid:sha) are new every deploy; that does not invalidate layers.
 
-FROM alpine:3.20 AS c-build
-RUN --mount=type=cache,target=/etc/apk/cache \
-    apk add build-base zlib-dev zlib-static
+FROM alpine:3.22 AS c-build
+RUN --mount=type=cache,id=apk-cbuild,target=/etc/apk/cache,sharing=locked \
+    apk add gcc musl-dev make zlib-dev zlib-static ccache
 WORKDIR /src
 COPY src/ src/
 COPY tools/ tools/
 COPY Makefile .
-RUN make bin/viewer bin/extract_tool CFLAGS="-std=c11 -Wall -Wextra -O2 -static"
+RUN --mount=type=cache,id=ccache-viewer,target=/root/.ccache \
+    make CC="ccache cc" bin/viewer bin/extract_tool \
+        CFLAGS="-std=c11 -Wall -Wextra -O2 -static"
 
 FROM node:20-alpine AS web-build
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci
-COPY tsconfig.json ./
 COPY web/ web/
-RUN npm run build
+RUN npm run build:web
 
-FROM alpine:3.20
-RUN --mount=type=cache,target=/etc/apk/cache \
-    apk add libc6-compat wget
+FROM alpine:3.22
+RUN --mount=type=cache,id=apk-runtime,target=/etc/apk/cache,sharing=locked \
+    apk add wget
 RUN mkdir -p /data/replays
 COPY --from=c-build /src/bin/viewer /usr/local/bin/viewer
 COPY --from=c-build /src/bin/extract_tool /usr/local/bin/extract_tool
