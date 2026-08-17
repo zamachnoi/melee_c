@@ -15,9 +15,10 @@ export function stadiumFieldType(event: number, type: number, previous: number):
 export const FOD_STAGE_ID = 2;
 export const FOD_LEFT_START = 16.125;
 export const FOD_RIGHT_START = 22.125;
-export const FOD_STAGE_SCALE = 0.75;
-/** DAT platform box is 3 units tall; half of that after grGroundParam. */
-export const FOD_PLATFORM_HALF_WORLD = 1.5 * FOD_STAGE_SCALE;
+/** FoD platform box is 3 units tall in DAT-local space; half is its walkable
+    top offset from the bone.  This is a property of the mesh geometry, not the
+    stage scale — the scale is applied by callers via `stageScale`. */
+export const FOD_PLATFORM_HALF_DAT = 1.5;
 
 function fodHeight(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : Number.NaN;
@@ -25,14 +26,15 @@ function fodHeight(value: number): number {
 
 /**
  * Slippi 0x3F spawn records (and our seed) are already gameplay mesh-top Y
- * (16.125 / 22.125). Later 0x3F values are HSD_JObj translate Y before the
- * 0.75 stage scale — the walkable top is `y * 0.75 + 1.125`.
+ * (16.125 / 22.125) in world space.  Later 0x3F values are HSD_JObj translate Y
+ * (DAT-local platform center) before `grGroundParam` scale — the walkable top
+ * is `(y + halfDepth) * stageScale`.
  */
-export function fodReplayHeightToWorldTop(height: number): number {
+export function fodReplayHeightToWorldTop(height: number, stageScale: number): number {
   const value = fodHeight(height);
   if (Number.isNaN(value)) return value;
   if (value === FOD_LEFT_START || value === FOD_RIGHT_START) return value;
-  return value * FOD_STAGE_SCALE + FOD_PLATFORM_HALF_WORLD;
+  return (value + FOD_PLATFORM_HALF_DAT) * stageScale;
 }
 
 function fillFrameRanges<T extends { frame: number }>(
@@ -67,7 +69,7 @@ export class ReplaySceneIndex {
   readonly stadiumType: Int16Array;
   readonly stadiumVisibleType: Int16Array;
 
-  constructor(readonly timeline: Timeline) {
+  constructor(readonly timeline: Timeline, stageScale = 1) {
     const count = timeline.frameCount;
     this.itemStarts = new Uint32Array(count);
     this.itemEnds = new Uint32Array(count);
@@ -101,7 +103,7 @@ export class ReplaySceneIndex {
         if (value.kind === STAGE_EVENT_FOD) {
           /* Slippi 0x3F: platform 0 = right, 1 = left. */
           const raw = timeline.stageId === FOD_STAGE_ID
-            ? fodReplayHeightToWorldTop(value.value0) : fodHeight(value.value0);
+            ? fodReplayHeightToWorldTop(value.value0, stageScale) : fodHeight(value.value0);
           if (value.index === 0) {
             if (!Number.isNaN(raw)) right = raw;
           } else if (value.index === 1) {

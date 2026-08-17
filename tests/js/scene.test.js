@@ -11,6 +11,9 @@ import { parseTimeline } from '../../web/dist/replay/timeline.js';
 const bytes = readFileSync('build/timeline-golden.bin');
 const timeline = parseTimeline(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
 
+/** FoD's grGroundParam stage scale as read from the stage DAT (griz.stage). */
+const FOD_SCALE = 0.75;
+
 test('scene index finds sparse items without per-frame searches', () => {
   const scene = new ReplaySceneIndex(timeline);
   const before = -1 - timeline.startFrame;
@@ -74,22 +77,22 @@ test('FoD stage seeds spawn heights and ignores a height-0 frame-0 event', () =>
       { frame: 0, kind: 1, index: 0, value0: 0, value1: 0 },
       { frame: 10, kind: 1, index: 0, value0: 25, value1: 0 },
     ],
-  });
+  }, FOD_SCALE);
   const at = (frame) => frame - (-123);
   assert.equal(scene.fodLeft[at(-123)], 16.125);
   assert.equal(scene.fodRight[at(-123)], 22.125);
   assert.equal(scene.fodLeft[at(0)], 16.125);
   assert.equal(scene.fodRight[at(0)], 22.125);
-  assert.equal(scene.fodRight[at(10)], fodReplayHeightToWorldTop(25));
+  assert.equal(scene.fodRight[at(10)], fodReplayHeightToWorldTop(25, FOD_SCALE));
   assert.equal(scene.fodLeft[at(10)], 16.125);
 });
 
 test('FoD 0x3F spawn records are world tops; motion records are JObj local Y', () => {
-  assert.equal(fodReplayHeightToWorldTop(FOD_LEFT_START), 16.125);
-  assert.equal(fodReplayHeightToWorldTop(FOD_RIGHT_START), 22.125);
-  assert.equal(fodReplayHeightToWorldTop(20), 16.125);
-  assert.equal(fodReplayHeightToWorldTop(28), 22.125);
-  const moved = fodReplayHeightToWorldTop(26.814117431640625);
+  assert.equal(fodReplayHeightToWorldTop(FOD_LEFT_START, FOD_SCALE), 16.125);
+  assert.equal(fodReplayHeightToWorldTop(FOD_RIGHT_START, FOD_SCALE), 22.125);
+  assert.equal(fodReplayHeightToWorldTop(20, FOD_SCALE), 16.125);
+  assert.equal(fodReplayHeightToWorldTop(28, FOD_SCALE), 22.125);
+  const moved = fodReplayHeightToWorldTop(26.814117431640625, FOD_SCALE);
   assert.ok(Math.abs(moved - 21.23558807373047) < 1e-5);
   const scene = new ReplaySceneIndex({
     stageId: 2,
@@ -100,7 +103,7 @@ test('FoD 0x3F spawn records are world tops; motion records are JObj local Y', (
       { frame: -123, kind: 1, index: 1, value0: 16.125, value1: 0 },
       { frame: 10, kind: 1, index: 1, value0: 26.814117431640625, value1: 0 },
     ],
-  });
+  }, FOD_SCALE);
   const at = (frame) => frame - (-123);
   assert.equal(scene.fodLeft[at(-123)], 16.125);
   assert.equal(scene.fodLeft[at(10)], moved);

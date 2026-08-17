@@ -432,7 +432,8 @@ export async function bootWebGL2(): Promise<void> {
 
   /* Fountain of Dreams: side platforms are section 2 bones 2/3 plus a second
      material pass on section 3 bones 1/2.  Replay heights are world Y; the
-     mesh is DAT-local and drawn at stageScale 0.75.  0x3F only fires when a
+     mesh is DAT-local and drawn at the stage's grGroundParam scale
+     (`sceneIndex` converts with that same scale).  0x3F only fires when a
      platform *changes* height, so seed the in-game spawn heights (left
      16.125, right 22.125) and ignore non-positive values — bind pose is
      world y=0 and sinks the mesh into the fountain. */
@@ -939,7 +940,7 @@ export async function bootWebGL2(): Promise<void> {
         [timelinePromise, fightersPromise, stagePromise, stageAnimsPromise, variantsPromise, effectsPromise]);
       if (controller.signal.aborted) return;
       timeline = timelineResult.timeline;
-      sceneIndex = new ReplaySceneIndex(timeline);
+      sceneIndex = new ReplaySceneIndex(timeline, loadedStage?.asset.scale ?? 1);
       loadedWireBytes = timelineResult.wireBytes + (loadedStage?.wireBytes ?? 0)
         + (loadedStageAnims?.wireBytes ?? 0) + effectResult.wireBytes;
       for (const loaded of loadedFighters) loadedWireBytes += loaded.wireBytes;

@@ -103,8 +103,9 @@ Measured on 2026-08-17 in Chromium:
   scaled to remaining shield size.
 - FoD's two moving platforms are the actual stage-section meshes (section 2
   bones 2/3 and the matching pass on section 3), re-posed so the mesh top
-  matches the recorded world-space `fodLeft`/`fodRight` height after FoD's
-  0.75 stage scale.  Slippi platform 0 is the right platform.  Whispy and
+  matches the recorded world-space `fodLeft`/`fodRight` height after the
+  stage's `grGroundParam` scale (0.75 for FoD, read from the DAT asset).
+  Slippi platform 0 is the right platform.  Whispy and
   Stadium records still drive persistent proxy indicators; their stage
   geometry is not yet deformed because the supplied fixtures contain no
   dynamic-stage events.
