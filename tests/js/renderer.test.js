@@ -39,6 +39,9 @@ test('stage section filter keeps playable platforms and drops skybox domes', () 
   const fod = parseStage(arrayBuffer('cache/griz.stage'));
   const fodAccepted = fod.sections.map((section, index) => isStageSection(section) ? index : null).filter(x => x !== null);
   assert.deepEqual(fodAccepted, [2, 3, 4], 'FoD renders platforms and fountain, dropping the background dome');
+  const ys = parseStage(arrayBuffer('cache/grst.stage'));
+  const ysAccepted = ys.sections.map((section, index) => isStageSection(section) ? index : null).filter(x => x !== null);
+  assert.deepEqual(ysAccepted, [2, 3], "Yoshi's Story keeps the main island, not the cubic skybox");
 });
 
 function boneWorldY(section, posed, bone) {

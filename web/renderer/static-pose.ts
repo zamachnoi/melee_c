@@ -83,15 +83,18 @@ export function isAcceptedFdSection(model: ModelAsset): boolean {
 }
 
 /** A stage section that belongs to the playable arena rather than the skybox.
-    Keeps platform/structure sections (like Battlefield sec 6, FoD's platforms)
-    and drops the huge background domes that surround every stage. */
+    Keeps platform/structure sections (Battlefield sec 6, FoD platforms,
+    Yoshi's Story's main island) and drops huge background domes. */
 export function isStageSection(model: ModelAsset): boolean {
   if (!model.vertexCount) return false;
   const bounds = positionBounds(transformBindPose(model));
   const width = bounds[3] - bounds[0];
   const height = bounds[4] - bounds[1];
   const depth = bounds[5] - bounds[2];
-  if (height < 1) return false;                       /* flat overlapping passes */
-  if (width > 320 || depth > 320) return false;       /* skybox domes           */
-  return Math.abs(bounds[0]) <= 160 && Math.abs(bounds[3]) <= 160;
+  if (height < 1) return false;
+  if (width > 2000 || depth > 2000 || height > 2000) return false;
+  const shortest = Math.min(width, height, depth);
+  const longest = Math.max(width, height, depth);
+  if (shortest > 0 && longest / shortest < 2 && width > 400) return false;
+  return true;
 }
