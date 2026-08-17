@@ -1691,7 +1691,6 @@ int main(int argc,char**argv){
                 if(strncmp(bn,"Gr",2)!=0)continue;
                 if(strncmp(bn,"GrT",3)==0)continue; /* target-test stages */
                 if(strncmp(bn,"GrEF",4)==0)continue; /* event stages */
-                if(strncmp(bn,"GrI1",4)==0||strncmp(bn,"GrI2",4)==0)continue; /* Mushroom Kingdom halves */
                 dat_t sd;
                 if(dat_open(iso_bytes+dats.items[i].offset,dats.items[i].size,&sd))continue;
                 asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
