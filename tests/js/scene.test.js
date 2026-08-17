@@ -28,3 +28,24 @@ test('dynamic stage state persists after sparse events', () => {
   assert.equal(scene.whispyDirection[next], 2);
   assert.equal(scene.stageEventEnds[current] - scene.stageEventStarts[current], 2);
 });
+
+test('FoD height holds last move and does not invent a frame-0 drop', () => {
+  const scene = new ReplaySceneIndex({
+    startFrame: -123,
+    frameCount: 400,
+    items: [],
+    stageEvents: [
+      { frame: 10, kind: 1, index: 0, value0: 25, value1: 0 },
+      { frame: 12, kind: 1, index: 1, value0: 18.5, value1: 0 },
+    ],
+  });
+  const at = (frame) => frame - (-123);
+  assert.ok(Number.isNaN(scene.fodRight[at(0)]));
+  assert.ok(Number.isNaN(scene.fodLeft[at(0)]));
+  assert.equal(scene.fodRight[at(10)], 25);
+  assert.equal(scene.fodRight[at(11)], 25);
+  assert.ok(Number.isNaN(scene.fodLeft[at(11)]));
+  assert.equal(scene.fodLeft[at(12)], 18.5);
+  assert.equal(scene.fodRight[at(200)], 25);
+  assert.equal(scene.fodLeft[at(200)], 18.5);
+});

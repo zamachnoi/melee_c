@@ -144,7 +144,9 @@ typedef struct {
     size_t frame_items_count;
     size_t frame_items_cap;
 
-    /* stage events, one slot per frame index (overwrite = latest wins) */
+    /* stage events, one slot per frame index (overwrite = latest wins).
+       Empty FoD/Whispy/Stadium slots use frame_number == INT32_MIN.
+       slp_fod_at returns the last recorded height at or before the frame. */
     slp_fod_platform_t *fod;      /* index = frame_index * 2 + platform */
     size_t fod_count;
     size_t fod_cap;
@@ -164,6 +166,8 @@ const slp_frame_t *slp_frame_at(const slp_replay_t *r, unsigned port,
 
 const slp_item_list_t *slp_items_at(const slp_replay_t *r,
                                     int32_t frame_number);
+/* Last 0x3F height for this platform at or before frame_number, or NULL
+   if it has not moved yet. */
 const slp_fod_platform_t *slp_fod_at(slp_replay_t *r, int32_t frame_number,
                                      unsigned platform);
 const slp_whispy_blow_t *slp_whispy_at(slp_replay_t *r, int32_t frame_number);

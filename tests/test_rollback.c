@@ -224,15 +224,76 @@ int main(void) {
     const slp_fod_platform_t *fod1 = slp_fod_at(&r, 0, 1);
     assert(fod0 && fod0->height == 30.0f);
     assert(fod1 && fod1->height == 40.0f);
+    const slp_fod_platform_t *fod0_hold = slp_fod_at(&r, 1, 0);
+    const slp_fod_platform_t *fod1_hold = slp_fod_at(&r, 1, 1);
+    assert(fod0_hold && fod0_hold->height == 30.0f);
+    assert(fod1_hold && fod1_hold->height == 40.0f);
     const slp_whispy_blow_t *whispy = slp_whispy_at(&r, 0);
     assert(whispy && whispy->direction == 2);
+    assert(slp_whispy_at(&r, 1) && slp_whispy_at(&r, 1)->direction == 2);
     const slp_stadium_transform_t *st = slp_stadium_at(&r, 0);
     assert(st && st->event == 5 && st->type == 6);
 
-    printf("rollback test passed (frame 0 x=%.1f, latest version won)\n",
-           f0->x);
-
     slp_replay_free(&r);
     free(buf);
+
+    /* A later FoD event must not invent a height-0 move at frame 0, and
+       frames after the last move keep the last recorded height. */
+    buf = malloc(N);
+    w = buf;
+    *w++ = '{';
+    *w++ = 'U'; *w++ = 3; memcpy(w, "raw", 3); w += 3;
+    *w++ = '['; *w++ = '$'; *w++ = 'U'; *w++ = '#';
+    *w++ = 'l';
+    raw_len_pos = w;
+    w += 4;
+    *w++ = 0x35; *w++ = 3 * 9 + 1;
+    *w++ = 0x36; put_u16be(w, 5); w += 2;
+    *w++ = 0x37; put_u16be(w, 66); w += 2;
+    *w++ = 0x38; put_u16be(w, 84); w += 2;
+    *w++ = 0x3B; put_u16be(w, 44); w += 2;
+    *w++ = 0x3C; put_u16be(w, 8); w += 2;
+    *w++ = 0x3F; put_u16be(w, 9); w += 2;
+    *w++ = 0x40; put_u16be(w, 5); w += 2;
+    *w++ = 0x41; put_u16be(w, 8); w += 2;
+    *w++ = 0x39; put_u16be(w, 6); w += 2;
+    *w++ = 0x36;
+    *w++ = 3; *w++ = 19; *w++ = 0; *w++ = 0; *w++ = 0;
+    emit_pre(&w, 0, 0, 0.0f);
+    emit_post(&w, 0, 0, 0.0f, 0.0f);
+    emit_bookend(&w, 0);
+    emit_pre(&w, 1, 0, 1.0f);
+    emit_post(&w, 1, 0, 1.0f, 0.0f);
+    emit_fod(&w, 1, 0, 25.0f);
+    emit_bookend(&w, 1);
+    emit_pre(&w, 2, 0, 2.0f);
+    emit_post(&w, 2, 0, 2.0f, 0.0f);
+    emit_bookend(&w, 2);
+    *w++ = 0x39; *w++ = 2; *w++ = 0xFF; *w++ = 0; *w++ = 1; *w++ = 2; *w++ = 3;
+    raw_len = (size_t)(w - (raw_len_pos + 4));
+    put_u32be(raw_len_pos, (uint32_t)raw_len);
+    *w++ = 'U'; *w++ = 8; memcpy(w, "metadata", 8); w += 8;
+    *w++ = '{';
+    *w++ = 'U'; *w++ = 9; memcpy(w, "lastFrame", 9); w += 9;
+    *w++ = 'l'; put_i32be(w, 2); w += 4;
+    *w++ = '}';
+    *w++ = '}';
+    len = (size_t)(w - buf);
+    e = slp_parse(buf, len, &r);
+    if (e != SLP_OK) {
+        printf("parse error (fod hold): %s\n", slp_error_string(e));
+        return 1;
+    }
+    assert(slp_fod_at(&r, 0, 0) == NULL);
+    assert(slp_fod_at(&r, 0, 1) == NULL);
+    fod0 = slp_fod_at(&r, 1, 0);
+    assert(fod0 && fod0->height == 25.0f && fod0->frame_number == 1);
+    fod0_hold = slp_fod_at(&r, 2, 0);
+    assert(fod0_hold && fod0_hold->height == 25.0f && fod0_hold->frame_number == 1);
+    assert(slp_fod_at(&r, 1, 1) == NULL);
+    slp_replay_free(&r);
+    free(buf);
+    printf("rollback test passed (frame 0 x=%.1f, FoD height holds after last move)\n",
+           -40.0);
     return 0;
 }
