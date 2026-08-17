@@ -1930,6 +1930,15 @@ static void extract_stock_icons(const fst_list_t *dats, const uint8_t *iso, cons
     }
     printf("  decoded %u/%u image descriptors\n", decoded_n, atlas.n_image);
 
+    char icon_dir[1100];
+    snprintf(icon_dir, sizeof icon_dir, "%s/icons", out);
+    if (mkdir(icon_dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "extract: cannot create %s\n", icon_dir);
+        for (uint16_t i = 0; i < atlas.n_image; i++) free(decoded[i]);
+        free(decoded); free(widths); free(heights); free(timg_keys); free(tclt_keys); free(ri.offs);
+        return;
+    }
+
     unsigned wrote = 0;
     for (size_t c = 0; c < CHAR_INFO_N; c++) {
         const char_info_t *ci = &CHAR_INFO[c];
@@ -1947,7 +1956,7 @@ static void extract_stock_icons(const fst_list_t *dats, const uint8_t *iso, cons
                 continue;
             }
             char path[1200];
-            snprintf(path, sizeof path, "%s/%s-%d.png", out, ci->name, col);
+            snprintf(path, sizeof path, "%s/icons/%s-%d.png", out, ci->name, col);
             if (write_png_rgba(path, widths[idx], heights[idx], decoded[idx]) == 0) wrote++;
         }
     }

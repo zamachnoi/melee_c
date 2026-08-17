@@ -1788,8 +1788,16 @@ static void handle_asset(int cfd, const char *req, const char *path) {
         strcmp(name + name_len - suffix_len, suffix) != 0) {
         send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return;
     }
-    char file_path[1400]; snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
+    char file_path[1400];
+    if (png_icon)
+        snprintf(file_path, sizeof file_path, "%s/icons/%s", asset_dir(), name);
+    else
+        snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
     size_t len = 0; char *body = read_whole_file(file_path, &len);
+    if (!body && png_icon) {
+        snprintf(file_path, sizeof file_path, "%s/%s", asset_dir(), name);
+        body = read_whole_file(file_path, &len);
+    }
     if (!body) { send_error(cfd, 404, "Not Found", "asset not found"); return; }
     if (png_icon) {
         static const unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
