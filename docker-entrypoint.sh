@@ -4,8 +4,8 @@ set -eu
 asset_dir="${ASSET_DIR:-/data/replays/cache}"
 iso_path="${MELEE_ISO:-/data/replays/game.iso}"
 
-if [ ! -f "$asset_dir/fd.stage" ] || \
-   [ ! -f "$asset_dir/fox-0.model" ] || \
+if [ ! -f "$asset_dir/grnla.stage" ] || \
+   [ ! -f "$asset_dir/popo-3.model" ] || \
    [ ! -f "$asset_dir/falco-0.model" ] || \
    [ ! -f "$asset_dir/effects.json" ] || \
    ! grep -q '"schema_version":4' "$asset_dir/meta.json" 2>/dev/null; then
