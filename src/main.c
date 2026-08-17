@@ -118,12 +118,15 @@ int main(int argc, char **argv) {
 
         const slp_fod_platform_t *fod0 = slp_fod_at(&r, fn, 0);
         const slp_fod_platform_t *fod1 = slp_fod_at(&r, fn, 1);
-        if (fod0) printf("  FOD platform R h=%7.2f\n", fod0->height);
-        if (fod1) printf("  FOD platform L h=%7.2f\n", fod1->height);
+        if (fod0 && fod0->frame_number == fn)
+            printf("  FOD platform R h=%7.2f\n", fod0->height);
+        if (fod1 && fod1->frame_number == fn)
+            printf("  FOD platform L h=%7.2f\n", fod1->height);
         const slp_whispy_blow_t *w = slp_whispy_at(&r, fn);
-        if (w) printf("  Whispy dir=%u\n", w->direction);
+        if (w && w->frame_number == fn) printf("  Whispy dir=%u\n", w->direction);
         const slp_stadium_transform_t *st = slp_stadium_at(&r, fn);
-        if (st) printf("  Stadium event=%u type=%u\n", st->event, st->type);
+        if (st && st->frame_number == fn)
+            printf("  Stadium event=%u type=%u\n", st->event, st->type);
 
         if (any) printf("\n");
     }
