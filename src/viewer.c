@@ -1928,25 +1928,34 @@ static char *read_whole_file(const char *path, size_t *len) {
     return buf;
 }
 
-/* Serves web/index.html from disk if present, else the embedded copy.
+/* Serves the WebGL2 slice only behind ?renderer=webgl2. The software viewer
+   stays the default throughout the migration.
    This lets you edit the frontend and just refresh -- no rebuild needed. */
-static void handle_root(int cfd) {
+static void handle_root(int cfd, const char *query) {
     char path[1400];
-    snprintf(path, sizeof path, "%s/index.html", g_web_dir);
+    char renderer[32] = "";
+    query_value(query, "renderer", renderer, sizeof renderer);
+    int webgl2 = strcmp(renderer, "webgl2") == 0;
+    snprintf(path, sizeof path, "%s/%s", g_web_dir,
+             webgl2 ? "webgl.html" : "index.html");
     size_t len = 0;
     char *body = read_whole_file(path, &len);
     if (body) {
         send_response(cfd, "text/html; charset=utf-8", body, len);
         free(body);
-    } else {
+    } else if (!webgl2) {
         send_response(cfd, "text/html; charset=utf-8", html_doc,
                       strlen(html_doc));
+    } else {
+        send_error(cfd, 500, "Internal Server Error",
+                   "web/webgl.html is missing");
     }
 }
 
 static int web_module_path(const char *path) {
     if (strcmp(path, "/main.js") != 0 &&
         strncmp(path, "/assets/", 8) != 0 &&
+        strncmp(path, "/animation/", 11) != 0 &&
         strncmp(path, "/replay/", 8) != 0 &&
         strncmp(path, "/renderer/", 10) != 0)
         return 0;
@@ -2003,7 +2012,7 @@ static void *conn_thread(void *arg) {
         char path[256] = "", query[256] = "";
         parse_path_query(req, path, sizeof path, query, sizeof query);
         if (strcmp(path, "/") == 0)
-            handle_root(cfd);
+            handle_root(cfd, query);
         else if (web_module_path(path))
             handle_web_module(cfd, path);
         else if (strcmp(path, "/api/info") == 0)

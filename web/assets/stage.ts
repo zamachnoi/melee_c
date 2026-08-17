@@ -28,3 +28,5 @@ export function parseStage(buffer: ArrayBuffer) {
   if (reader.offset !== buffer.byteLength) throw new Error(`stage: ${buffer.byteLength - reader.offset} trailing bytes`);
   return { schema, scale, cameraPosition, cameraFov, cameraVerticalAngle, cameraHorizontalAngle, sections, lights };
 }
+
+export type StageAsset = ReturnType<typeof parseStage>;

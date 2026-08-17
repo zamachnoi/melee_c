@@ -121,3 +121,5 @@ export function parseModel(buffer: ArrayBuffer) {
   if (reader.offset !== buffer.byteLength) throw new Error(`model: ${buffer.byteLength - reader.offset} trailing bytes`);
   return model;
 }
+
+export type ModelAsset = ReturnType<typeof parseModel>;

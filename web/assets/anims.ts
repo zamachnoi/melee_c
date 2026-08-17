@@ -47,3 +47,5 @@ export function parseAnimations(buffer: ArrayBuffer) {
   if (reader.offset !== buffer.byteLength) throw new Error(`animations: ${buffer.byteLength - reader.offset} trailing bytes`);
   return { schema, actions, keyCount: totalKeys };
 }
+
+export type AnimationsAsset = ReturnType<typeof parseAnimations>;

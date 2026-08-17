@@ -60,6 +60,21 @@ const moduleResponse = await fetch(`${baseUrl}/main.js`);
 assert.equal(moduleResponse.status, 200);
 assert.match(moduleResponse.headers.get('content-type'), /text\/javascript/);
 assert.match(await moduleResponse.text(), /parseTimeline/);
+const animationModule = await fetch(`${baseUrl}/animation/pose.js`);
+assert.equal(animationModule.status, 200);
+assert.match(animationModule.headers.get('content-type'), /text\/javascript/);
+const sceneModule = await fetch(`${baseUrl}/replay/scene.js`);
+assert.equal(sceneModule.status, 200);
+assert.match(sceneModule.headers.get('content-type'), /text\/javascript/);
+
+const [softwarePage, webglPage] = await Promise.all([
+  fetch(`${baseUrl}/`).then(response => response.text()),
+  fetch(`${baseUrl}/?renderer=webgl2`).then(response => response.text()),
+]);
+assert.match(softwarePage, /Melee 2D Replay/);
+assert.doesNotMatch(softwarePage, /data-renderer="webgl2"/);
+assert.match(webglPage, /data-renderer="webgl2"/);
+assert.match(webglPage, /Melee WebGL2 replay renderer/);
 
 const iceClimbersId = secondId;
 const iceManifest = second.manifest;
@@ -77,4 +92,4 @@ const replayList = await (await fetch(`${baseUrl}/api/replays`)).json();
 assert.equal(replayList.find(replay => replay.id === firstId).name, 'vertical.slp');
 assert.equal(replayList.find(replay => replay.id === iceClimbersId).name, 'ICs.slp');
 
-console.log(`HTTP integration passed: distinct replay isolation, ${first.bytes} byte timeline, Nana shared action bank`);
+console.log(`HTTP integration passed: renderer flag isolation, distinct replays, ${first.bytes} byte timeline, Nana shared action bank`);
