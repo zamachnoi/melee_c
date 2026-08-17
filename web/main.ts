@@ -138,6 +138,7 @@ export async function bootWebGL2(): Promise<void> {
   const warningOverlay = element<HTMLDivElement>('warningOverlay');
   const debugOverlay = element<HTMLPreElement>('debugOverlay');
   const debugToggle = element<HTMLButtonElement>('debugToggle');
+  const resolutionSelect = element<HTMLSelectElement>('resolutionSelect');
 
   const fillReplaySelect = (replays: ReplayListItem[], selectedId?: string): void => {
     replaySelect.replaceChildren(...replays.map(replay => {
@@ -740,12 +741,26 @@ export async function bootWebGL2(): Promise<void> {
     updateFrame(snapshot.frame); updateDiagnostics();
   };
 
+  const RESOLUTION_PRESETS: Record<string, { width: number; height: number } | null> = {
+    '4k': { width: 2880, height: 2160 },
+    '1440p': { width: 1920, height: 1440 },
+    '1080p': { width: 1440, height: 1080 },
+    '720p': { width: 960, height: 720 },
+    auto: null,
+  };
+
   const resize = (): void => {
     measureViewport();
-    renderer.resize({ width: viewportSize.width, height: viewportSize.height, devicePixelRatio: window.devicePixelRatio || 1 });
+    let dpr = window.devicePixelRatio || 1;
+    const preset = RESOLUTION_PRESETS[resolutionSelect.value];
+    if (preset && viewportSize.height > 0 && viewportSize.width > 0) {
+      dpr = Math.max(dpr, preset.height / viewportSize.height, preset.width / viewportSize.width);
+    }
+    renderer.resize({ width: viewportSize.width, height: viewportSize.height, devicePixelRatio: dpr });
     if (timeline && camera.mode !== 'free') applyAutomaticCamera(frame - timeline.startFrame);
     renderCurrent();
   };
+  resolutionSelect.addEventListener('change', resize);
   const resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(viewportElement);
   addEventListener('resize', resize);
