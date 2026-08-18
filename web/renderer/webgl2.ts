@@ -207,23 +207,28 @@ void main() {
   if (u_tev.x > 0) src = tevResult(tex, u_tevK0, u_tevK1, u_tevK2);
   float cm = u_combine.x;
   float am = u_combine.y;
+  /* HSD TObj colormap/alphamap: GX lerp d+(1-c)*a+c*b with d=0.
+     ALPHA_MASK mix(prev, src, src.a); RGB_MASK mix(prev, src, src.rgb);
+     BLEND mix(prev, src, blend). */
   vec3 rgb;
-  if (cm > 7.5) rgb = prev.rgb - src.rgb;              // SUB
-  else if (cm > 6.5) rgb = prev.rgb + src.rgb;         // ADD
-  else if (cm > 5.5) rgb = prev.rgb;                   // PASS
-  else if (cm > 4.5) rgb = src.rgb;                    // REPLACE
-  else if (cm > 3.5) rgb = prev.rgb * src.rgb;         // MODULATE
-  else if (cm > 2.5) rgb = (prev.rgb + src.rgb) * u_combine.z; // BLEND
-  else if (cm > 1.5) rgb = (prev.rgb + src.rgb) * src.a; // RGB_MASK
-  else rgb = prev.rgb;                                 // ALPHA_MASK / NONE
+  if (cm > 7.5) rgb = prev.rgb - src.rgb;              // SUB 8
+  else if (cm > 6.5) rgb = prev.rgb + src.rgb;         // ADD 7
+  else if (cm > 5.5) rgb = prev.rgb;                   // PASS 6
+  else if (cm > 4.5) rgb = src.rgb;                    // REPLACE 5
+  else if (cm > 3.5) rgb = prev.rgb * src.rgb;         // MODULATE 4
+  else if (cm > 2.5) rgb = mix(prev.rgb, src.rgb, u_combine.z); // BLEND 3
+  else if (cm > 1.5) rgb = mix(prev.rgb, src.rgb, src.rgb); // RGB_MASK 2
+  else if (cm > 0.5) rgb = mix(prev.rgb, src.rgb, src.a);   // ALPHA_MASK 1
+  else rgb = prev.rgb;                                 // NONE 0
   float al;
-  if (am > 6.5) al = prev.a - src.a;                   // SUB
-  else if (am > 5.5) al = prev.a + src.a;              // ADD
-  else if (am > 4.5) al = prev.a;                      // PASS
-  else if (am > 3.5) al = src.a;                       // REPLACE
-  else if (am > 2.5) al = prev.a * src.a;              // MODULATE
-  else if (am > 1.5) al = (prev.a + src.a) * u_combine.z; // BLEND
-  else al = prev.a;                                    // NONE/ALPHA_MASK
+  if (am > 6.5) al = prev.a - src.a;                   // SUB 7
+  else if (am > 5.5) al = prev.a + src.a;              // ADD 6
+  else if (am > 4.5) al = prev.a;                      // PASS 5
+  else if (am > 3.5) al = src.a;                       // REPLACE 4
+  else if (am > 2.5) al = prev.a * src.a;              // MODULATE 3
+  else if (am > 1.5) al = mix(prev.a, src.a, u_combine.z); // BLEND 2
+  else if (am > 0.5) al = mix(prev.a, src.a, src.a);   // ALPHA_MASK 1
+  else al = prev.a;                                    // NONE 0
   outColor = vec4(rgb, al);
   if (outColor.a <= 0.0) discard;
 }`;
@@ -1066,7 +1071,9 @@ export class WebGL2Renderer implements Renderer {
       gl.uniform4f(u.tevK0, tev.constant[0] / 255, tev.constant[1] / 255, tev.constant[2] / 255, tev.constant[3] / 255);
       gl.uniform4f(u.tevK1, tev.tev0[0] / 255, tev.tev0[1] / 255, tev.tev0[2] / 255, tev.tev0[3] / 255);
       gl.uniform4f(u.tevK2, tev.tev1[0] / 255, tev.tev1[1] / 255, tev.tev1[2] / 255, tev.tev1[3] / 255);
-      gl.uniform4f(u.combine, tev.colormap, tev.alphamap, tev.blend, 0);
+      const colormap = group.textureIndex >= 0 ? tev.colormap : 0;
+      const alphamap = group.textureIndex >= 0 ? tev.alphamap : 0;
+      gl.uniform4f(u.combine, colormap, alphamap, tev.blend, 0);
       gl.uniform4f(u.texGen, tev.repeatS / sx, tev.repeatT / sy, Math.cos(rot), Math.sin(rot));
       gl.uniform2f(u.texGenTrans, tev.texTrans[0], tev.texTrans[1]);
       gl.uniform2f(u.wrap, tev.wrapS, tev.wrapT);

@@ -1,6 +1,7 @@
 import { parseAnimations, type AnimationsAsset } from './assets/anims.js';
 import { parseModel, type ModelAsset } from './assets/model.js';
 import { parseStage, type StageAsset } from './assets/stage.js';
+import { parseProps, type PropsAsset } from './assets/props.js';
 import { PoseEvaluator, evaluateStageAnim, evaluateStagePose, stageBoneYOffset, type PoseEvaluation } from './animation/pose.js';
 import { ReplayClock } from './replay/clock.js';
 import { ReplaySceneIndex, FOD_LEFT_START, FOD_RIGHT_START, FOD_STAGE_ID } from './replay/scene.js';
@@ -26,9 +27,10 @@ export { parseTimeline, measureTimeline } from './replay/timeline.js';
 export { parseModel } from './assets/model.js';
 export { parseAnimations } from './assets/anims.js';
 export { parseStage } from './assets/stage.js';
+export { parseProps } from './assets/props.js';
 
 interface ReplayListItem { id: string; name: string; file: string }
-interface ManifestAsset { slot?: number; model?: string; animations?: string; stage?: string; stadiumType?: number }
+interface ManifestAsset { slot?: number; model?: string; animations?: string; stage?: string; stadiumType?: number; props?: string }
 interface FighterAsset extends ManifestAsset { slot: number; model: string; animations: string }
 interface ReplayManifest {
   id: string; name: string; startFrame: number; endFrame: number; stageId: number;
@@ -171,10 +173,12 @@ export async function bootWebGL2(): Promise<void> {
   const modelCache = new Map<string, ModelAsset>();
   const animationCache = new Map<string, AnimationsAsset>();
   const stageCache = new Map<string, StageAsset>();
+  const propsCache = new Map<string, PropsAsset>();
   const effectModelCache = new Map<string, ModelAsset>();
   const modelPending = new Map<string, Promise<CachedResult<ModelAsset>>>();
   const animationPending = new Map<string, Promise<CachedResult<AnimationsAsset>>>();
   const stagePending = new Map<string, Promise<CachedResult<StageAsset>>>();
+  const propsPending = new Map<string, Promise<CachedResult<PropsAsset>>>();
   const effectModelPending = new Map<string, Promise<CachedResult<ModelAsset>>>();
   let effectCatalog: EffectCatalog | null | undefined;
 
@@ -930,19 +934,25 @@ export async function bootWebGL2(): Promise<void> {
           assetWarnings.push(`stage animations unavailable: ${errorMessage(error)}`); return null;
         })
         : Promise.resolve(null);
+      const propsPromise: Promise<CachedResult<PropsAsset> | null> = stageAsset?.props
+        ? loadCached(stageAsset.props, propsCache, propsPending, parseProps).catch(error => {
+          assetWarnings.push(`stage props unavailable: ${errorMessage(error)}`); return null;
+        })
+        : Promise.resolve(null);
       const variantsPromise = Promise.all(variantAssets.map(async asset => {
         const loaded = await loadStage(asset.stage!);
         if (!loaded) return null;
         return { type: asset.stadiumType as number, asset: loaded.asset, wireBytes: loaded.wireBytes };
       }));
       const effectsPromise = timelinePromise.then(({ timeline }) => loadEffectBank(timeline));
-      const [timelineResult, loadedFighters, loadedStage, loadedStageAnims, loadedVariants, effectResult] = await Promise.all(
-        [timelinePromise, fightersPromise, stagePromise, stageAnimsPromise, variantsPromise, effectsPromise]);
+      const [timelineResult, loadedFighters, loadedStage, loadedStageAnims, loadedVariants, effectResult, loadedProps] = await Promise.all(
+        [timelinePromise, fightersPromise, stagePromise, stageAnimsPromise, variantsPromise, effectsPromise, propsPromise]);
       if (controller.signal.aborted) return;
       timeline = timelineResult.timeline;
       sceneIndex = new ReplaySceneIndex(timeline, loadedStage?.asset.scale ?? 1);
       loadedWireBytes = timelineResult.wireBytes + (loadedStage?.wireBytes ?? 0)
-        + (loadedStageAnims?.wireBytes ?? 0) + effectResult.wireBytes;
+        + (loadedStageAnims?.wireBytes ?? 0) + (loadedProps?.wireBytes ?? 0)
+        + effectResult.wireBytes;
       for (const loaded of loadedFighters) loadedWireBytes += loaded.wireBytes;
       for (const variant of loadedVariants) if (variant) loadedWireBytes += variant.wireBytes;
       for (const loaded of loadedFighters) assetWarnings.push(...loaded.warnings);
@@ -995,6 +1005,16 @@ export async function bootWebGL2(): Promise<void> {
           assetWarnings.push(`no visible stage sections for ${manifest.stageName}`);
       } else {
         mapAnimEntries = [];
+      }
+      /* Stage props (Yoshi's Story shy guys) render as static stage geometry
+         at their baked position for now; per-prop animation can drive
+         `stageAnimated` in a later pass. */
+      if (loadedProps) {
+        const propSections = loadedProps.asset.props
+          .filter(prop => prop.model.vertexCount > 0)
+          .map(prop => prop.model);
+        if (propSections.length) source.stageSections = [...source.stageSections, ...propSections];
+        else assetWarnings.push(`no visible stage props for ${manifest.stageName}`);
       }
       setupFodPlatforms(source, loadedStage?.asset.sections ?? []);
       renderer.setScene(source);

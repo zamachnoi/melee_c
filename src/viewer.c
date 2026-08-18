@@ -758,11 +758,20 @@ static void handle_replay_manifest(int cfd, const char *req, const char *id) {
         first = false;
     }
     const char *stage_slug = stage_asset_slug(replay.game_start.stage_id);
-    if (stage_slug)
+    if (stage_slug) {
         o += (size_t)snprintf(json + o, sizeof json - o,
                              "%s{\"stage\":\"" ASSET_URL_PREFIX "stages/%s.stage\","
-                             "\"animations\":\"" ASSET_URL_PREFIX "stages/%s.anims?s=1\"}",
+                             "\"animations\":\"" ASSET_URL_PREFIX "stages/%s.anims?s=1\"",
                              first ? "" : ",", stage_slug, stage_slug);
+        char props_path[512];
+        snprintf(props_path, sizeof props_path, "%s/v5/stages/%s.props",
+                 asset_dir(), stage_slug);
+        if (access(props_path, R_OK) == 0)
+            o += (size_t)snprintf(json + o, sizeof json - o,
+                                 ",\"props\":\"" ASSET_URL_PREFIX "stages/%s.props\"",
+                                 stage_slug);
+        o += (size_t)snprintf(json + o, sizeof json - o, "}");
+    }
     if (replay.game_start.stage_id == 3) {
         static const struct { const char *slug; int type; } variants[] = {
             { "grps1", 3 }, { "grps2", 4 }, { "grps4", 6 }, { "grps3", 9 },
@@ -967,8 +976,10 @@ static void handle_asset(int cfd, const char *req, const char *path) {
     }
     if (strchr(name, '/')) { send_error(cfd, 404, "Not Found", "asset is not allowlisted"); return; }
     if (strncmp(relative, "stages/", 7) == 0) {
-        suffix = strstr(name, ".stage") ? ".stage" : ".anims";
-        ctype = strstr(name, ".stage") ? "application/vnd.melee.stage" : "application/vnd.melee.animations";
+        suffix = strstr(name, ".stage") ? ".stage" : (strstr(name, ".props") ? ".props" : ".anims");
+        if (strstr(name, ".stage")) ctype = "application/vnd.melee.stage";
+        else if (strstr(name, ".props")) ctype = "application/vnd.melee.props";
+        else ctype = "application/vnd.melee.animations";
     } else if (strncmp(relative, "effects/", 8) == 0) {
         suffix = ".model"; ctype = "application/vnd.melee.model";
     } else if (strncmp(relative, "icons/", 6) == 0) {

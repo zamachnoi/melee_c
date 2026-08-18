@@ -165,15 +165,34 @@ typedef struct {
     asset_light_t *lights;
 } asset_stage_t;
 
+/* ---- stage props (animated actors like Yoshi's Story shy guys) ----
+   Extracted from GrSt.dat's `itemdata` root. Each prop carries a model
+   (HSD Joint tree) + its animation clips. Live in a separate
+   `stages/<slug>.props` file so it never perturbs the shared .stage/.anims
+   layout or other stages. */
+typedef struct {
+    uint32_t kind;        /* item kind (e.g. It_Kind_Heiho) */
+    float pos[3];         /* baked world position (root JOBJ translate) */
+    asset_model_t model;
+    asset_anims_t anims;
+} asset_prop_t;
+
+typedef struct {
+    uint32_t prop_count;
+    asset_prop_t *props;
+} asset_props_t;
+
 /* ---- load / free ---- */
 
 asset_model_t *asset_model_load(const char *path);
 asset_anims_t *asset_anims_load(const char *path);
 asset_stage_t *asset_stage_load(const char *path);
+asset_props_t *asset_props_load(const char *path);
 
 void asset_model_free(asset_model_t *m);
 void asset_anims_free(asset_anims_t *a);
 void asset_stage_free(asset_stage_t *s);
+void asset_props_free(asset_props_t *p);
 
 /* ---- meta.json helpers (writer side) ---- */
 

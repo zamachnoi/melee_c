@@ -275,7 +275,7 @@ export class PoseEvaluator {
           const value = sampleTrack(track, frame - track.startFrame);
           switch (track.channel) {
             case 1: rx = value; break; case 2: ry = value; break; case 3: rz = value; break;
-            case 5: case 11: tx = value; break; case 6: ty = value; break; case 7: tz = value; break;
+            case 5: tx = value; break; case 6: ty = value; break; case 7: tz = value; break;
             case 8: sx = value; break; case 9: sy = value; break; case 10: sz = value; break;
           }
         }
@@ -430,7 +430,7 @@ export function evaluateStageAnim(
         const value = sampleTrack(track, t - track.startFrame);
         switch (track.channel) {
           case 1: rx = value; break; case 2: ry = value; break; case 3: rz = value; break;
-          case 5: case 11: tx = value; break; case 6: ty = value; break; case 7: tz = value; break;
+          case 5: tx = value; break; case 6: ty = value; break; case 7: tz = value; break;
           case 8: sx = value; break; case 9: sy = value; break; case 10: sz = value; break;
         }
       }

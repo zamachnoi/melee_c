@@ -276,8 +276,69 @@ asset_stage_t *asset_stage_load(const char *path) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Free                                                                */
+/* Stage props                                                         */
 /* ------------------------------------------------------------------ */
+
+asset_props_t *asset_props_load(const char *path) {
+    reader_t r = load_file(path);
+    if (!r.p) return NULL;
+    check_magic(&r, ASSET_MAGIC, path);
+    asset_props_t *p = calloc(1, sizeof(asset_props_t));
+    p->prop_count = rd32(&r);
+    p->props = calloc(p->prop_count ? p->prop_count : 1, sizeof(asset_prop_t));
+    for (uint32_t i = 0; i < p->prop_count; i++) {
+        asset_prop_t *pr = &p->props[i];
+        pr->kind = rd32(&r);
+        for (int k = 0; k < 3; k++) pr->pos[k] = rdf32(&r);
+        pr->model = *model_from_reader(&r);
+        /* anims block always follows (writer emits it via write_anims, which
+           includes its own magic/schema header) */
+        check_magic(&r, ASSET_MAGIC, path);
+        pr->anims.action_count = 0;
+        pr->anims.actions = NULL;
+        uint32_t nact = rd32(&r);
+        if (nact) {
+            pr->anims.action_count = nact;
+            pr->anims.actions = calloc(nact, sizeof(asset_action_t));
+            for (uint32_t a = 0; a < nact; a++) {
+                asset_action_t *act = &pr->anims.actions[a];
+                rd_bytes(&r, act->name, 48);
+                act->end_frame = rdf32(&r);
+                act->loop = rd8(&r) != 0;
+                rd8(&r);
+                rd16(&r);
+                act->joint_count = rd32(&r);
+                act->joints = calloc(act->joint_count ? act->joint_count : 1,
+                                     sizeof(asset_joint_anim_t));
+                for (uint32_t j = 0; j < act->joint_count; j++) {
+                    asset_joint_anim_t *ja = &act->joints[j];
+                    ja->bone_index = rd16(&r);
+                    ja->track_count = rd32(&r);
+                    ja->tracks = calloc(ja->track_count ? ja->track_count : 1,
+                                        sizeof(asset_track_t));
+                    for (uint32_t k = 0; k < ja->track_count; k++) {
+                        asset_track_t *tk = &ja->tracks[k];
+                        tk->channel = rd8(&r);
+                        tk->start_frame = rd16(&r);
+                        tk->key_count = rd32(&r);
+                        tk->keys = calloc(tk->key_count ? tk->key_count : 1,
+                                          sizeof(asset_key_t));
+                        for (uint32_t q = 0; q < tk->key_count; q++) {
+                            asset_key_t *k = &tk->keys[q];
+                            k->frame = rdf32(&r);
+                            k->value = rdf32(&r);
+                            k->in_tan = rdf32(&r);
+                            k->out_tan = rdf32(&r);
+                            k->interp = rd8(&r);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    free((void *)r.p);
+    return p;
+}
 
 void asset_model_free(asset_model_t *m) {
     if (!m) return;
@@ -322,4 +383,31 @@ void asset_stage_free(asset_stage_t *s) {
     free(s->sections);
     free(s->lights);
     free(s);
+}
+
+void asset_props_free(asset_props_t *p) {
+    if (!p) return;
+    for (uint32_t i = 0; i < p->prop_count; i++) {
+        asset_model_t *m = &p->props[i].model;
+        free(m->bones);
+        free(m->vertices);
+        free(m->indices);
+        free(m->pgroups);
+        free(m->phongs);
+        for (uint32_t t = 0; t < m->texture_count; t++) free(m->textures[t].rgba);
+        free(m->textures);
+        asset_anims_t *a = &p->props[i].anims;
+        for (uint32_t ai = 0; ai < a->action_count; ai++) {
+            asset_action_t *act = &a->actions[ai];
+            for (uint32_t j = 0; j < act->joint_count; j++) {
+                asset_joint_anim_t *ja = &act->joints[j];
+                for (uint32_t k = 0; k < ja->track_count; k++) free(ja->tracks[k].keys);
+                free(ja->tracks);
+            }
+            free(act->joints);
+        }
+        free(a->actions);
+    }
+    free(p->props);
+    free(p);
 }

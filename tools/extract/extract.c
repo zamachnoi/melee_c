@@ -309,6 +309,11 @@ static void tex_put(uint8_t*rgba,uint32_t idx,uint32_t v){
     rgba[idx*4+3]=(uint8_t)((v>>24)&0xFF);
 }
 
+static uint32_t pal_at(const uint32_t*pal,size_t paln,uint32_t idx){
+    if(!pal||paln==0)return 0;
+    return pal[idx<paln?idx:0];
+}
+
 static void decode_texture(uint32_t fmt,uint16_t w,uint16_t h,const uint8_t*data,
                            const uint32_t*pal,size_t paln,uint8_t*rgba){
     size_t npx=(size_t)w*h;
@@ -371,20 +376,20 @@ static void decode_texture(uint32_t fmt,uint16_t w,uint16_t h,const uint8_t*data
             for(uint32_t y=0;y<h;y+=8)for(uint32_t x=0;x<w;x+=8)
             for(uint32_t y1=y;y1<y+8&&y1<h;y1++)for(uint32_t x1=x;x1<x+8;x1+=2){
                 uint8_t p=data[inp++];
-                if(x1<w)tex_put(rgba,y1*w+x1,pal[p>>4]);
-                if(x1+1<w)tex_put(rgba,y1*w+x1+1,pal[p&0xF]);
+                if(x1<w)tex_put(rgba,y1*w+x1,pal_at(pal,paln,p>>4));
+                if(x1+1<w)tex_put(rgba,y1*w+x1+1,pal_at(pal,paln,p&0xF));
             }
             break;}
         case 9:{ /* CI8 */
             if(!pal)break;
             for(uint32_t y=0;y<h;y+=4)for(uint32_t x=0;x<w;x+=8)
             for(uint32_t y1=y;y1<y+4&&y1<h;y1++)for(uint32_t x1=x;x1<x+8&&x1<w;x1++){
-                tex_put(rgba,y1*w+x1,pal[data[inp++]]);
+                tex_put(rgba,y1*w+x1,pal_at(pal,paln,data[inp++]));
             }
             break;}
         case 10:{ /* CI14X2 */
             if(!pal)break;
-            for(uint32_t i=0;i<npx&&inp+2<=npx*2;i++){uint16_t p=r16(data+inp);inp+=2;uint32_t idx=p&0x3FFF;if(idx<paln)tex_put(rgba,i,pal[idx]);}
+            for(uint32_t i=0;i<npx&&inp+2<=npx*2;i++){uint16_t p=r16(data+inp);inp+=2;tex_put(rgba,i,pal_at(pal,paln,p&0x3FFF));}
             break;}
         case 14:{ /* CMPR */
             uint32_t ww=(w%8==0)?w:w+(8-w%8);
@@ -618,6 +623,7 @@ static int tobj_decode(builder_t*b,uint32_t tobj_rel,tobj_img_t*out){
     switch(fmt){case 0:case 8:case 14:ts=(size_t)((w+7)/8)*((h+7)/8)*32;break;case 1:case 2:case 9:ts=(size_t)((w+7)/8)*((h+3)/4)*32;break;case 3:case 4:case 5:case 10:ts=(size_t)((w+3)/4)*((h+3)/4)*32;break;case 6:ts=(size_t)((w+3)/4)*((h+3)/4)*64;break;default:ts=(size_t)w*h*4;}
     uint32_t da=dat_abs(b->d,data_rel);if(da+ts>b->d->len)ts=b->d->len-da;
     if(w == 0 || h == 0 || w > 1024 || h > 1024) { free(pal); return -1; }
+    if((fmt==8||fmt==9||fmt==10)&&(!pal||paln==0)){ free(pal); return -1; }
     asset_texture_t tex;memset(&tex,0,sizeof tex);tex.width=w;tex.height=h;tex.format=fmt;
     tex.rgba=malloc((size_t)w*h*4);
     decode_texture(fmt,w,h,b->d->bytes+da,pal,paln,tex.rgba);
@@ -1462,10 +1468,13 @@ static int decode_stage(const dat_t*d,asset_stage_t*st,asset_anims_t*anims){
             uint32_t root_jobj_rel=r32(d->bytes+gabs);
             if(root_jobj_rel){
                 asset_model_t*m=build_model(d,root_jobj_rel,NULL);
-                /* Bake matAnim[0]'s starting material colors (frame 0). */
-                uint32_t mat_joint_rel=r32(d->bytes+gabs+0x08);
+                /* Bake matAnim[0]'s starting material colors (frame 0).
+                   map_gobj+0x08 is a null-terminated pointer array, same as
+                   +0x04 AnimJoint (noclip Melee_map_gobj_Load). */
+                uint32_t matp=rdptr(d,&ri,group_rel,0x08);
+                uint32_t mat0=matp?rdptr(d,&ri,matp-0x20,0):0;
                 uint32_t bone=0;
-                if(mat_joint_rel)matanim_apply(d,&ri,mat_joint_rel,root_jobj_rel,&bone,m);
+                if(mat0)matanim_apply(d,&ri,mat0-0x20,root_jobj_rel,&bone,m);
                 st->sections[i]=*m;
                 free(m);
             }
@@ -1508,6 +1517,85 @@ static int decode_stage(const dat_t*d,asset_stage_t*st,asset_anims_t*anims){
         st->light_count=lc;
     }
     return 0;
+}
+
+/* ---- stage props (animated actors: Yoshi's Story shy guys, etc.) ---- */
+
+/* Decode the stage's animated props from its `itemdata` root.
+ * `itemdata` is a null-terminated array of pointers to `{ kind; Article* }`
+ * pairs. Each Article carries the actor's model (HSD Joint tree) and an
+ * ItemStateArray of 8 ItemStateDesc (16 bytes each):
+ *     { anim_joint*, matanim_joint*, shapeanim_joint*, script }
+ * Layouts follow the Melee decomp (src/melee/gr/types.h + item.c). Pointers
+ * in GrSt.dat are plain data-relative offsets inside the same DAT, so each
+ * resolves with dat_abs(). */
+static asset_props_t *decode_stage_props(const dat_t*d){
+    asset_props_t *out=calloc(1,sizeof(asset_props_t));
+    uint32_t cap=0,n=0;
+    reloc_idx_t ri;reloc_build(d,&ri);
+    const uint8_t*arr=NULL;
+    for(uint32_t i=0;i<d->root_count;i++){
+        uint32_t doff=r32(d->bytes+d->roots_start+(size_t)i*8);
+        uint32_t no=r32(d->bytes+d->roots_start+(size_t)i*8+4);
+        if(strcmp(dat_name(d,no),"itemdata")==0){arr=dat_at(d,doff);break;}
+    }
+    if(!arr){free(ri.offs);return out;}
+    for(uint32_t idx=0;idx<32;idx++){
+        const uint8_t*ent=dat_at(d,r32(arr+idx*4));
+        if(!ent||ent+8>d->bytes+d->reloc_start)break;
+        uint32_t kind=r32(ent);
+        uint32_t article_rel=r32(ent+4);
+        const uint8_t*art=dat_at(d,article_rel);
+        if(!art||art+0x14>d->bytes+d->reloc_start)continue;
+        uint32_t modeldesc_rel=r32(art+0x10);
+        const uint8_t*md=dat_at(d,modeldesc_rel);
+        if(!md||md+8>d->bytes+d->reloc_start)continue;
+        uint32_t joint_rel=r32(md); /* HSD Joint root */
+        if(!joint_rel)continue;
+        asset_prop_t p;memset(&p,0,sizeof p);
+        p.kind=kind;
+        const uint8_t*j=dat_at(d,joint_rel);
+        if(j){p.pos[0]=rf32(j+0x2C);p.pos[1]=rf32(j+0x30);p.pos[2]=rf32(j+0x34);}
+        asset_model_t*m=build_model(d,joint_rel,NULL);
+        p.model=*m;free(m);
+        uint32_t states_rel=r32(art+0x0C);
+        const uint8_t*st=dat_at(d,states_rel);
+        if(st&&st+4<=d->bytes+d->reloc_start){
+            uint32_t anim_rel=r32(st); /* ItemStateDesc[0].x0_anim_joint */
+            if(anim_rel){
+                asset_action_t act;memset(&act,0,sizeof act);
+                snprintf(act.name,sizeof act.name,"state0");
+                act.loop=true;
+                aj_walk_t w={.d=d,.ri=&ri,.act=&act};
+                uint32_t bone=0;
+                walk_animjoint(&w,joint_rel,dat_abs(d,anim_rel),&bone);
+                if(act.joint_count){p.anims.action_count=1;p.anims.actions=malloc(sizeof(asset_action_t));p.anims.actions[0]=act;}
+                else free_action(&act);
+            }
+        }
+        if(p.model.vertex_count){
+            if(n==cap){cap=cap?cap*2:4;out->props=realloc(out->props,cap*sizeof(asset_prop_t));}
+            out->props[n++]=p;
+            printf("    prop kind=%u bones=%u verts=%u animtracks=%u pos=(%.1f,%.1f,%.1f)\n",
+                   kind,p.model.bone_count,p.model.vertex_count,
+                   n?(out->props[n-1].anims.action_count?out->props[n-1].anims.actions[0].joint_count:0):0,
+                   p.pos[0],p.pos[1],p.pos[2]);
+        }else{
+            free_anims_contents(&p.anims);
+        }
+    }
+    out->prop_count=n;
+    free(ri.offs);
+    return out;
+}
+
+static void asset_props_free_contents(asset_props_t*p){
+    if(!p)return;
+    for(uint32_t i=0;i<p->prop_count;i++){
+        free_anims_contents(&p->props[i].anims);
+        /* model internals are short-lived extractor allocations; leave to exit() */
+    }
+    free(p->props);p->props=NULL;p->prop_count=0;
 }
 
 static void write_stage(FILE*f,const asset_stage_t*s);
@@ -1563,6 +1651,25 @@ static void write_stage(FILE*f,const asset_stage_t*s){
         wf(f,s->lights[i].a0);wf(f,s->lights[i].a1);wf(f,s->lights[i].a2);
         wf(f,s->lights[i].k0);wf(f,s->lights[i].k1);wf(f,s->lights[i].k2);
     }
+}
+
+/* props cache serialization: prop_count, then per prop {kind,pos,model,anims} */
+static void write_props(FILE*f,const asset_props_t*p){
+    w32(f,ASSET_MAGIC);w32(f,ASSET_SCHEMA_VERSION);
+    w32(f,p->prop_count);
+    for(uint32_t i=0;i<p->prop_count;i++){
+        const asset_prop_t*pr=&p->props[i];
+        w32(f,pr->kind);
+        for(int k=0;k<3;k++)wf(f,pr->pos[k]);
+        write_model(f,&pr->model);
+        write_anims(f,&pr->anims);
+    }
+}
+static void write_props_file(const char*dir,const char*name,const asset_props_t*p){
+    char path[1200];snprintf(path,sizeof path,"%s/%s",dir,name);
+    FILE*f=fopen(path,"wb");if(!f)die("cannot write props cache");
+    write_props(f,p);fclose(f);
+    printf("wrote %s: %u props\n",name,p->prop_count);
 }
 
 /* meta.json writer */
@@ -2166,6 +2273,7 @@ static int decode_image_abs(const dat_t *d, uint32_t image_abs, uint32_t tlut_ab
     uint32_t da = dat_abs(d, data_rel);
     if (da >= d->len) { free(pal); return -1; }
     if (da + ts > d->len) ts = d->len - da;
+    if ((fmt == 8 || fmt == 9 || fmt == 10) && (!pal || paln == 0)) { free(pal); return -1; }
     uint8_t *rgba = malloc((size_t)w * h * 4);
     if (!rgba) { free(pal); return -1; }
     decode_texture(fmt, w, h, d->bytes + da, pal, paln, rgba);
@@ -2541,6 +2649,13 @@ int main(int argc,char**argv){
                     uint32_t animated=0;
                     for(uint32_t a=0;a<anims.action_count;a++)if(anims.actions[a].joint_count)animated++;
                     if(animated)printf("  %s: %u/%u map clips\n",bn,animated,anims.action_count);
+                    /* stage props (shy guys etc.) -> separate .props file */
+                    asset_props_t*props=decode_stage_props(&sd);
+                    if(props->prop_count){
+                        memcpy(name+n,".props",7);
+                        write_props_file(stages_dir,name,props);
+                    }
+                    asset_props_free_contents(props);free(props);
                 }else{
                     printf("stage decode failed: %s\n",bn);
                 }
@@ -2551,6 +2666,7 @@ int main(int argc,char**argv){
             }
         }else if(which_stage){
             if(strcasecmp(which_stage,"FD")==0||strcasecmp(which_stage,"final-destination")==0)stname="GrNLa.dat";
+            else if(strcasecmp(which_stage,"STY")==0||strcasecmp(which_stage,"yoshis-story")==0)stname="GrSt.dat";
             if(stname){
                 const fst_file_t*sf=iso_find(&dats,stname);
                 if(!sf)die("stage dat not found");
@@ -2559,8 +2675,20 @@ int main(int argc,char**argv){
                 asset_stage_t*st=calloc(1,sizeof(asset_stage_t));
                 asset_anims_t anims={0};
                 if(decode_stage(&sd,st,&anims)==0){
-                    write_stage_file(stages_dir,"fd.stage",st);
-                    write_anims_file(stages_dir,"fd.anims",&anims);
+                    const char*slug;
+                    if(strcasecmp(which_stage,"FD")==0||strcasecmp(which_stage,"final-destination")==0)slug="fd";
+                    else slug="grst";
+                    char stage_name[256],anims_name[256];
+                    snprintf(stage_name,sizeof stage_name,"%s.stage",slug);
+                    snprintf(anims_name,sizeof anims_name,"%s.anims",slug);
+                    write_stage_file(stages_dir,stage_name,st);
+                    write_anims_file(stages_dir,anims_name,&anims);
+                    asset_props_t*props=decode_stage_props(&sd);
+                    if(props->prop_count){
+                        char props_name[256];snprintf(props_name,sizeof props_name,"%s.props",slug);
+                        write_props_file(stages_dir,props_name,props);
+                    }
+                    asset_props_free_contents(props);free(props);
                 }else{
                     printf("stage decode failed\n");
                 }
